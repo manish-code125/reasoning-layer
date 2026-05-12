@@ -1,214 +1,117 @@
-# AI Engineering Reasoning Layer
+# Reasoning Layer
 
-An ambient reasoning layer that sits alongside AI coding agents. It captures developer prompts, detects architectural and product ambiguity, routes unresolved questions to PMs and architects via Slack, and stores answers as reusable project memory that enriches future prompts.
+An ambient reasoning and review system that sits between a developer and an AI coding agent. It intercepts non-trivial tasks, surfaces architectural questions, routes high-risk decisions to the right reviewers via Slack, and stores every answer as searchable project memory — so your AI agent never re-litigates a settled decision.
 
-> **Design assumption:** Using Fastify instead of Express — same Node.js ecosystem, TypeScript-first, better performance, consistent with the existing async-clarification tooling in this repo.
+→ [Executive Summary](EXECUTIVE_SUMMARY.md) · [How to Use](HOW_TO_USE.md) · [Dev conventions](CLAUDE.md)
 
 ---
 
-## Phase 1 — Backend Skeleton
+## How it works
 
-**What this phase delivers:** Postgres schema (with pgvector column ready for Phase 4), Fastify REST API with all endpoints stubbed correctly, full data model wired through Prisma. No LLM calls yet — Phase 2 makes the analysis real.
+```
+Developer types a task in Claude Code
+        │
+        ▼
+Pipeline intercepts → classifies risk → generates clarifying questions
+        │
+        ├── Low-risk → developer answers inline in Claude conversation
+        └── High-risk → routed to Slack reviewer as a structured thread
+                │
+                ▼
+        Answer saved as WAL entry in Postgres
+        (reasoning arc + rationale + pgvector embedding)
+                │
+                ▼
+        Future prompts automatically enriched with relevant past decisions
+```
 
-### Prerequisites
+---
 
-- Node.js 20+
-- pnpm (`npm install -g pnpm`)
-- Docker or OrbStack (for Postgres)
+## Stack
 
-### File tree
+| Layer | Technology |
+|---|---|
+| Backend API | Fastify · Prisma · Postgres · pgvector |
+| AI pipeline | Claude Haiku (classification) · Claude Sonnet (question generation) |
+| Notifications | Slack Bolt — Socket Mode threads + modals |
+| Frontend portal | Next.js 15 App Router |
+| Developer integration | VS Code extension + Claude Code agent file (fully automatic) |
+| Infrastructure | EC2 · nginx · pm2 |
+
+---
+
+## Monorepo structure
 
 ```
 reasoning-layer/
-├── docker-compose.yml          Postgres + pgvector
-├── .env.example
-├── pnpm-workspace.yaml
-├── package.json                root scripts
-└── packages/
-    └── backend/
-        ├── package.json
-        ├── tsconfig.json
-        ├── prisma/
-        │   └── schema.prisma   Prompt, Question, Decision models
-        └── src/
-            ├── index.ts        Fastify server + route registration
-            ├── db.ts           Prisma client singleton
-            ├── types.ts        Shared TypeScript interfaces
-            └── routes/
-                ├── prompts.ts  POST/GET /api/prompts/*
-                ├── questions.ts POST /api/questions/:id/answer|route
-                └── decisions.ts GET/POST /api/decisions/*
-```
-
-### Setup
-
-```bash
-# 1. Start Postgres with pgvector
-docker-compose up -d
-
-# 2. Install dependencies
-pnpm install
-
-# 3. Copy env file — DATABASE_URL default works as-is with docker-compose
-cp .env.example .env
-
-# 4. Run database migrations (creates schema + enables vector extension)
-pnpm db:migrate
-# When prompted for a migration name, enter: init
-
-# 5. Start the backend
-pnpm dev
-```
-
-### Verify
-
-```bash
-# Health check
-curl http://localhost:3002/health
-# {"status":"ok","phase":1}
-
-# Submit a prompt
-curl -s -X POST http://localhost:3002/api/prompts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "content": "Build a multi-tenant billing reconciliation service",
-    "repo_path": "/projects/billing",
-    "language": "typescript"
-  }' | jq .
-# Returns: { "prompt_id": "<uuid>", "status": "pending", ... }
-
-# Trigger stub analysis (generates 3 placeholder questions)
-PROMPT_ID=<paste prompt_id here>
-curl -s -X POST http://localhost:3002/api/prompts/$PROMPT_ID/analyze | jq .
-
-# Check generated questions
-curl -s http://localhost:3002/api/prompts/$PROMPT_ID/questions | jq .
-
-# Answer a question locally
-QUESTION_ID=<paste question_id>
-curl -s -X POST http://localhost:3002/api/questions/$QUESTION_ID/answer \
-  -H "Content-Type: application/json" \
-  -d '{
-    "answer": "Asynchronous via SQS — billing can tolerate 1-2s delay",
-    "rationale": "Sync adds latency on the checkout path; SQS gives a retry buffer for free"
-  }' | jq .
-
-# Route a high-risk question to Slack (stub — Phase 3 makes this real)
-curl -s -X POST http://localhost:3002/api/questions/$QUESTION_ID/route \
-  -H "Content-Type: application/json" \
-  -d '{"reviewer_slack_id": "UXXXXX"}' | jq .
-
-# Check the decision store
-curl -s http://localhost:3002/api/decisions | jq .
-
-# Seed a historical decision manually
-curl -s -X POST http://localhost:3002/api/decisions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question_text": "Should we use Redis or Postgres for session tokens?",
-    "answer": "Redis — Postgres adds latency we cannot afford at auth scale",
-    "rationale": "p99 auth latency SLA is 50ms; Postgres at our write volume adds ~30ms",
-    "linked_repo": "/projects/billing"
-  }' | jq .
+├── packages/backend/          Fastify API, Prisma, LLM pipeline
+│   ├── src/
+│   │   ├── routes/            prompts.ts · questions.ts · decisions.ts
+│   │   ├── llm/               analyzer.ts · embedder.ts · prompts.ts
+│   │   ├── slack/             bolt-app.ts · message-builder.ts · routing.ts
+│   │   └── db/                repos.ts
+│   └── prisma/
+│       ├── schema.prisma
+│       └── migrations/
+├── packages/ui/               Next.js 15 decision portal
+├── packages/vscode-extension/ VS Code extension (.vsix)
+├── EXECUTIVE_SUMMARY.md
+├── HOW_TO_USE.md
+└── CLAUDE.md
 ```
 
 ---
 
-## API Reference (Phase 1)
+## Decision memory model
+
+Every answer is stored as an **append-only WAL entry** — never edited, only superseded via `rollback`:
+
+| Type | Meaning |
+|---|---|
+| `decision` | Settled positive answer |
+| `wont_do` | Explicit rejection ("not doing in v1") |
+| `table` | Deferred to a later phase |
+| `branch` | Needs decomposition into sub-decisions |
+| `rollback` | Supersedes a prior decision (must reference original) |
+| `observation` | Constraint note — no action needed |
+
+Each entry stores the answer, rationale, alternatives considered, reopen condition, reviewer, linked files, and **reasoning arc** — the full dialogue context that led to the decision, not just the conclusion.
+
+---
+
+## API reference
 
 | Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Liveness check |
-| POST | `/api/prompts` | Submit a prompt for analysis |
-| GET | `/api/prompts/:id` | Get prompt with questions and decisions |
-| POST | `/api/prompts/:id/analyze` | Trigger analysis (stub → Phase 2 LLM) |
-| GET | `/api/prompts/:id/questions` | Get questions ordered by risk level |
-| GET | `/api/prompts/:id/enriched` | Get enriched prompt (stub → Phase 5 pgvector) |
-| POST | `/api/questions/:id/answer` | Answer a question locally, creates Decision |
-| POST | `/api/questions/:id/route` | Route to Slack reviewer (stub → Phase 3 Bolt) |
-| GET | `/api/decisions` | List decisions (?repo=&limit=) |
-| GET | `/api/decisions/:id` | Get a specific decision |
-| POST | `/api/decisions` | Seed a standalone historical decision |
+|---|---|---|
+| `POST` | `/api/prompts` | Submit a task for analysis |
+| `POST` | `/api/prompts/:id/analyze` | Run LLM pipeline — classifies risk, generates questions |
+| `GET` | `/api/prompts/:id` | Get prompt with questions and decisions |
+| `GET` | `/api/prompts/:id/enriched` | Get prompt enriched with semantically relevant past decisions |
+| `POST` | `/api/questions/:id/answer` | Answer a question locally |
+| `POST` | `/api/questions/:id/route` | Route a question to a Slack reviewer |
+| `POST` | `/api/questions/route-batch` | Route multiple questions — groups under one session thread |
+| `GET` | `/api/decisions` | List decisions (`?repo=&limit=`) |
+| `POST` | `/api/decisions` | Seed a standalone historical decision |
+| `GET` | `/api/decisions/export` | Full ADR-style markdown export |
+| `GET` | `/api/decisions/export-since` | Decisions since timestamp — used by `Sync Decision Log` |
+| `POST` | `/api/decisions/search` | Semantic similarity search over the decision store |
 
 ---
 
-## Phase 2 — Prompt Analysis Pipeline
-
-**New files:** `src/llm/prompts.ts` (templates), `src/llm/analyzer.ts` (pipeline)
-**Modified:** `src/routes/prompts.ts` (analyze endpoint is now real)
-
-### Additional setup
-
-Add your Anthropic API key to `.env`:
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-### How it works
-
-`POST /api/prompts/:id/analyze` now makes two sequential Claude API calls:
-
-1. **Classify** (Haiku — fast/cheap): sends the prompt + repo context, receives structured JSON:
-   ```json
-   { "domain": "billing", "risk_level": "high", "architectural_impact": "high",
-     "product_ambiguity": "medium", "surfaced_concerns": ["audit", "multi-tenancy", "consistency"] }
-   ```
-
-2. **Generate questions** (Sonnet — better reasoning): uses the classification as context,
-   generates 3–6 targeted questions with `risk_level` and `should_escalate` per question.
-
-Question count scales with risk: `low→3, medium→4, high→5, critical→6`.
-
-### Demo
+## Development
 
 ```bash
-# Submit and analyze a real prompt
-curl -s -X POST http://localhost:3002/api/prompts \
-  -H "Content-Type: application/json" \
-  -d '{"content":"Build a multi-tenant billing reconciliation service","repo_path":"/projects/billing","language":"typescript"}' | jq .
-
-PROMPT_ID=<from above>
-
-curl -s -X POST http://localhost:3002/api/prompts/$PROMPT_ID/analyze | jq .
-# Returns real domain classification, risk score, and 5 targeted questions
-# Each question has: text, category, risk_level, should_escalate
+pnpm install
+pnpm dev        # backend on :3002
+pnpm ui:dev     # UI on :3001
+pnpm db:migrate # run pending migrations
+pnpm db:studio  # open Prisma Studio
 ```
 
-### Prompt templates
+See [HOW_TO_USE.md](HOW_TO_USE.md) for full local setup, VS Code extension install, and Slack configuration.
 
-The exact prompts sent to Claude are in [`src/llm/prompts.ts`](packages/backend/src/llm/prompts.ts) —
-readable, testable, and tunable without touching any other code.
+---
 
-Override models via env:
-```
-CLASSIFIER_MODEL=claude-haiku-4-5-20251001   # default
-QUESTION_MODEL=claude-sonnet-4-6              # default
-```
+## Stoa integration
 
-## Phase 3 — Slack Integration *(coming)*
-
-Replaces `POST /api/questions/:id/route` stub. Delivers:
-- Slack Bolt in Socket Mode (no public URL needed)
-- Message with original prompt + question + Answer button
-- Modal capture → decision persisted → developer notified in VS Code
-
-## Phase 4 — Decision Memory + pgvector Retrieval *(coming)*
-
-Embeds decisions on creation. Delivers:
-- Embedding generation via Anthropic `text-embedding-3-small`
-- `GET /api/decisions?prompt_id=<id>` triggers similarity search
-- Top-K relevant decisions returned by cosine similarity
-
-## Phase 5 — Prompt Enrichment *(coming)*
-
-Wires `GET /api/prompts/:id/enriched`. Delivers:
-- Embed new prompt, retrieve top-3 decisions scoped to same repo
-- Produces enriched prompt block the extension hands to the AI tool
-
-## Phase 6 — VS Code / Cursor Extension *(coming)*
-
-TypeScript extension. Delivers:
-- "Analyze this prompt" command
-- Quick-pick showing clarification questions
-- One-click Slack routing
-- Enriched context injected before the developer sends to their AI tool
+Reasoning Layer is being aligned with [Stoa](https://github.com/RelationalAI/stoa-ai) reasoning discipline — adding refining sessions, artifact coherence enforcement, and pre-commit WAL auditing on top of the existing automated pipeline. See the [integration roadmap](EXECUTIVE_SUMMARY.md#stoa-reasoning-discipline--integration-roadmap).

@@ -99,6 +99,23 @@ Decisions and prompts are scoped to a `Repo` record (table: `repos`, field: `pat
 
 ---
 
+## WAL discipline (Phase 1 — Stoa integration)
+
+Decisions are proper **append-only WAL entries**. The `Decision` model has been upgraded:
+
+- `reasoningArc String?` — the dialogue context that led to this entry. Richer than just Q+A; captures the reasoning arc from a refining session. Populated by Phase 2 sessions; `null` for fast-path Q→A answers.
+- `sessionId String?` — FK placeholder for the `RefiningSession` model (Phase 2). Already present in the schema so Phase 2 can backfill without a schema migration.
+- `rollback` entries are validated across **all write paths** (REST routes + Slack modal): `supersedes_id` must reference a valid existing decision. Previously the Slack modal did not validate this.
+- `reasoning_arc` is included in all API responses, `GET /decisions/export`, and `GET /decisions/export-since` markdown output.
+
+**Planned phases:**
+- **Phase 2 — Refining Session:** `RefiningSession` + `SessionMessage` models; multi-turn Slack dialogue before settling; `POST /sessions` lifecycle endpoints
+- **Phase 3 — Artifact Coherence:** `TrackedArtifact` + `ArtifactDecisionLink`; drift detection; pre-commit hook
+- **Phase 4 — Agent File Cadences:** pre-task drift check + post-decision propagation pass in `.claude/reasoning-layer.md`
+- **Phase 5 — Context Log Export:** `GET /repos/:id/context-log` renders full WAL as Stoa-compatible markdown from Postgres
+
+---
+
 ## Backend API conventions
 
 - DB statuses (`unanswered`, `answered_locally`, `resolved`, `routed`) are translated to UI statuses (`pending`, `answered`, `answered`, `routed`) via `mapStatus()` in [packages/backend/src/routes/prompts.ts](packages/backend/src/routes/prompts.ts). Never return raw DB statuses to the UI.
