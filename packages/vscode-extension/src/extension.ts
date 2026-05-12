@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import * as cp from "child_process";
 import { apiPost, apiGet, developerSlackId, repoPath, openFilePath } from "./api/client";
 import { DecisionPanel } from "./panels/DecisionPanel";
 import { syncLog } from "./commands/syncLog";
@@ -335,6 +336,298 @@ async function enrichContext(): Promise<void> {
   );
 }
 
+// ─── Artifact coherence commands ─────────────────────────────────────────────
+
+const IGNORE_PATTERNS = [
+  "**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.next/**",
+  "**/out/**", "**/coverage/**", "**/*.generated.*", "**/*.lock", "**/pnpm-lock.yaml",
+  "**/package-lock.json", "**/.stoa/**", "**/.claude/**",
+];
+
+function gitLastCommitTs(filePath: string, root: string): string | null {
+  try {
+    const rel = path.relative(root, filePath);
+    const out = cp.execSync(`git log --format="%aI" -n 1 -- "${rel}"`, { cwd: root }).toString().trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getOrCreateRepoId(root: string): Promise<string> {
+  const result = await apiPost<{ repo_id?: string; id?: string }>("/api/prompts", {
+    content: "__repo_probe__",
+    repo_path: root,
+  });
+  // We only need the repo to be upserted — delete the probe prompt silently
+  return result.repo_id ?? "";
+}
+
+async function resolveRepoByPath(root: string): Promise<string | null> {
+  try {
+    // Track a dummy artifact to force repo upsert, then get the repo id via artifacts list
+    // Simpler: use the repo path directly as the :id param (artifacts route accepts path or UUID)
+    const artifacts = await apiGet<{ artifact_id: string }[]>(
+      `/api/repos/${encodeURIComponent(root)}/artifacts`
+    );
+    return root; // route accepts path as id
+  } catch {
+    return null;
+  }
+}
+
+async function initArtifacts(): Promise<void> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) return;
+
+  // Ask mode upfront
+  const mode = await vscode.window.showQuickPick(
+    [
+      { label: "Interactive", description: "Review each file one by one (recommended)", value: "interactive" },
+      { label: "All", description: "Track all candidate files automatically", value: "all" },
+      { label: "Cancel", description: "", value: "cancel" },
+    ],
+    { title: "Reasoning Layer: Init Artifacts", placeHolder: "How do you want to select files to track?" }
+  );
+  if (!mode || mode.value === "cancel") return;
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Scanning workspace…", cancellable: false },
+    async () => {
+      const uris = await vscode.workspace.findFiles("**/*", `{${IGNORE_PATTERNS.join(",")}}`);
+      // Keep only files with meaningful extensions
+      const candidates = uris
+        .filter((u) => /\.(ts|tsx|js|jsx|py|go|rs|java|rb|sql|prisma|md|yaml|yml|json|toml|sh)$/.test(u.fsPath))
+        .map((u) => path.relative(root, u.fsPath))
+        .slice(0, 100); // cap at 100 for UX
+
+      if (!candidates.length) {
+        vscode.window.showInformationMessage("No trackable files found.");
+        return;
+      }
+
+      const toTrack: Array<{ filePath: string; description: string }> = [];
+
+      if (mode.value === "all") {
+        for (const f of candidates) toTrack.push({ filePath: f, description: "" });
+      } else {
+        // Interactive: show QuickPick with all candidates, let user multi-select
+        const picked = await vscode.window.showQuickPick(
+          candidates.map((f) => ({ label: f, picked: false })),
+          { title: `Select files to track (${candidates.length} candidates)`, canPickMany: true, placeHolder: "Space to select, Enter to confirm" }
+        );
+        if (!picked?.length) return;
+
+        for (const item of picked) {
+          const desc = await vscode.window.showInputBox({
+            title: `Role of ${item.label}`,
+            placeHolder: "e.g. canonical DB schema, billing service, auth middleware…",
+            ignoreFocusOut: true,
+          });
+          toTrack.push({ filePath: item.label, description: desc?.trim() ?? "" });
+        }
+      }
+
+      // POST each tracked file to the backend
+      let tracked = 0;
+      for (const { filePath, description } of toTrack) {
+        try {
+          await apiPost(`/api/repos/${encodeURIComponent(root)}/artifacts`, {
+            file_path: filePath,
+            description: description || undefined,
+          });
+          tracked++;
+        } catch { /* skip files that fail */ }
+      }
+
+      vscode.window.showInformationMessage(
+        `Reasoning Layer: tracked ${tracked} file${tracked !== 1 ? "s" : ""}. Use "Link Decision to Files" after answering questions to connect decisions to these files.`
+      );
+    }
+  );
+}
+
+async function trackCurrentFile(): Promise<void> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const editor = vscode.window.activeTextEditor;
+  if (!root || !editor) {
+    vscode.window.showWarningMessage("Open a file to track it.");
+    return;
+  }
+
+  const filePath = path.relative(root, editor.document.uri.fsPath);
+  const description = await vscode.window.showInputBox({
+    title: `Track: ${filePath}`,
+    placeHolder: "Describe the role of this file (e.g. canonical DB schema)…",
+    ignoreFocusOut: true,
+  });
+  if (description === undefined) return; // cancelled
+
+  try {
+    await apiPost(`/api/repos/${encodeURIComponent(root)}/artifacts`, {
+      file_path: filePath,
+      description: description.trim() || undefined,
+    });
+    vscode.window.showInformationMessage(`Reasoning Layer: now tracking ${filePath}`);
+  } catch (err) {
+    vscode.window.showErrorMessage(`Failed to track file: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function checkDrift(): Promise<void> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) return;
+
+  let drifted: Array<{ file_path: string; latest_decision: { hex_id: string; question_text: string; answer: string; created_at: string } }> = [];
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Checking artifact drift…", cancellable: false },
+    async () => {
+      // Build file timestamp map for all tracked artifacts via git
+      const artifacts = await apiGet<Array<{ file_path: string }>>(`/api/repos/${encodeURIComponent(root)}/artifacts`);
+      if (!artifacts.length) {
+        vscode.window.showInformationMessage("No tracked artifacts yet. Run 'Init Artifacts' first.");
+        return;
+      }
+
+      const fileTimestamps: Record<string, string> = {};
+      for (const a of artifacts) {
+        const ts = gitLastCommitTs(path.join(root, a.file_path), root);
+        if (ts) fileTimestamps[a.file_path] = ts;
+      }
+
+      const result = await apiPost<{ drifted: typeof drifted }>(
+        `/api/repos/${encodeURIComponent(root)}/artifacts/drift`,
+        { file_timestamps: fileTimestamps }
+      );
+      drifted = result.drifted;
+    }
+  );
+
+  if (!drifted.length) {
+    vscode.window.showInformationMessage("✅ No drift detected — all tracked files are coherent with their decisions.");
+    return;
+  }
+
+  const items = drifted.map((d) => ({
+    label: `⚠ ${d.file_path}`,
+    description: `decision \`${d.latest_decision.hex_id}\` is newer`,
+    detail: d.latest_decision.question_text,
+    d,
+  }));
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: `${drifted.length} drifted file${drifted.length !== 1 ? "s" : ""} — decisions are newer than last commit`,
+    placeHolder: "Select a file to see the relevant decision",
+  });
+
+  if (picked) {
+    const d = picked.d.latest_decision;
+    await vscode.window.showInformationMessage(
+      `Decision \`${d.hex_id}\` (${d.created_at.slice(0, 10)}): ${d.answer}`,
+      { modal: true }
+    );
+  }
+}
+
+async function generateCoherenceHook(): Promise<void> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) return;
+
+  const hookMode = vscode.workspace.getConfiguration("reasoning-layer").get<string>("hookMode") ?? "warn";
+  const backendUrl =
+    vscode.workspace.getConfiguration("reasoning-layer").get<string>("backendUrl") ??
+    "http://44.200.186.86/reasoning";
+
+  const hookDir = path.join(root, ".githooks");
+  const hookPath = path.join(hookDir, "pre-commit");
+
+  const hookContent = `#!/usr/bin/env bash
+# Reasoning Layer coherence hook — auto-generated, do not edit manually.
+# Mode: ${hookMode} — change via VS Code setting reasoning-layer.hookMode
+
+set -euo pipefail
+
+BACKEND="${backendUrl}"
+REPO_PATH="$(git rev-parse --show-toplevel)"
+
+# Get staged files
+STAGED=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+# Build file timestamps and check drift
+python3 << 'PYEOF'
+import json, subprocess, urllib.request, urllib.error, sys, os
+
+BACKEND = os.environ.get("REASONING_LAYER_BACKEND", "${backendUrl}")
+REPO_PATH = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip()
+STAGED = subprocess.check_output(["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"]).decode().strip().split("\\n")
+
+file_timestamps = {}
+for f in STAGED:
+    if not f:
+        continue
+    try:
+        ts = subprocess.check_output(["git", "log", "--format=%aI", "-n", "1", "--", f]).decode().strip()
+        if ts:
+            file_timestamps[f] = ts
+    except Exception:
+        pass
+
+if not file_timestamps:
+    sys.exit(0)
+
+try:
+    body = json.dumps({"file_timestamps": file_timestamps}).encode()
+    req = urllib.request.Request(
+        BACKEND + "/api/repos/" + urllib.parse.quote(REPO_PATH, safe="") + "/artifacts/drift",
+        data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    import urllib.parse
+    req = urllib.request.Request(
+        BACKEND + "/api/repos/" + urllib.parse.quote(REPO_PATH, safe="") + "/artifacts/drift",
+        data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    resp = json.loads(urllib.request.urlopen(req, timeout=5).read())
+    drifted = resp.get("drifted", [])
+except Exception:
+    sys.exit(0)  # network failure — never block a commit
+
+if not drifted:
+    sys.exit(0)
+
+print("\\n⚠  Reasoning Layer: decisions exist that may not be reflected in these files:")
+for d in drifted:
+    dec = d["latest_decision"]
+    print(f"  {d['file_path']} ← [{dec['hex_id']}] {dec['question_text']}")
+    print(f"    Decision: {dec['answer'][:120]}")
+print()
+${hookMode === "block"
+  ? `print("Commit blocked (hookMode=block). Update the files or create a WAL entry, then retry.")
+sys.exit(1)`
+  : `print("Continuing commit (hookMode=warn). Run 'Reasoning Layer: Check Drift' in VS Code to review.")
+sys.exit(0)`}
+PYEOF
+`;
+
+  fs.mkdirSync(hookDir, { recursive: true });
+  fs.writeFileSync(hookPath, hookContent, { mode: 0o755 });
+
+  // Wire git to use .githooks/
+  try {
+    cp.execSync("git config core.hooksPath .githooks", { cwd: root });
+  } catch {
+    vscode.window.showWarningMessage("Could not set core.hooksPath — run: git config core.hooksPath .githooks");
+    return;
+  }
+
+  vscode.window.showInformationMessage(
+    `Coherence hook written to .githooks/pre-commit (mode: ${hookMode}). It will check artifact drift on every commit.`
+  );
+}
+
 // ─── Ambient agent file install ───────────────────────────────────────────────
 
 const CLAUDE_IMPORT_LINE = "@.claude/reasoning-layer.md";
@@ -429,7 +722,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("reasoning-layer.viewDecisions", () =>
       DecisionPanel.createOrShow(context.extensionUri)
     ),
-    vscode.commands.registerCommand("reasoning-layer.syncLog", syncLog)
+    vscode.commands.registerCommand("reasoning-layer.syncLog", syncLog),
+    vscode.commands.registerCommand("reasoning-layer.initArtifacts", initArtifacts),
+    vscode.commands.registerCommand("reasoning-layer.trackCurrentFile", trackCurrentFile),
+    vscode.commands.registerCommand("reasoning-layer.checkDrift", checkDrift),
+    vscode.commands.registerCommand("reasoning-layer.generateCoherenceHook", generateCoherenceHook)
   );
 }
 

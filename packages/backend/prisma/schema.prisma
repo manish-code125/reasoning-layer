@@ -12,14 +12,42 @@ datasource db {
 // A git repository tracked by this tool — the unit of isolation for decisions and prompts.
 // Created automatically on first prompt submission for a given path.
 model Repo {
-  id        String     @id @default(uuid())
-  path      String     @unique   // absolute or relative path used as the stable identifier
-  name      String?              // optional display name
-  createdAt DateTime   @default(now())
-  prompts   Prompt[]
-  decisions Decision[]
+  id               String            @id @default(uuid())
+  path             String            @unique   // absolute or relative path used as the stable identifier
+  name             String?                     // optional display name
+  createdAt        DateTime          @default(now())
+  prompts          Prompt[]
+  decisions        Decision[]
+  trackedArtifacts TrackedArtifact[]
 
   @@map("repos")
+}
+
+// A file in a repo that is governed by one or more WAL decisions.
+// Tracked artifacts are watched for coherence — when a linked decision is newer
+// than the file's last commit, the file is flagged as drifted.
+model TrackedArtifact {
+  id          String                 @id @default(uuid())
+  repoId      String
+  repo        Repo                   @relation(fields: [repoId], references: [id])
+  filePath    String                 // relative path within the repo
+  description String?                // role this file plays (e.g. "canonical DB schema")
+  createdAt   DateTime               @default(now())
+  links       ArtifactDecisionLink[]
+
+  @@unique([repoId, filePath])
+  @@map("tracked_artifacts")
+}
+
+// Junction table linking tracked files to the decisions that govern them.
+model ArtifactDecisionLink {
+  artifactId  String
+  artifact    TrackedArtifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  decisionId  String
+  decision    Decision        @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+
+  @@id([artifactId, decisionId])
+  @@map("artifact_decision_links")
 }
 
 // A developer prompt submitted for architectural analysis
@@ -101,6 +129,7 @@ model Decision {
   linkedRepo             String?    // kept for backwards compat — prefer repoId going forward
   repoId                 String?
   repo                   Repo?      @relation(fields: [repoId], references: [id])
+  artifactLinks          ArtifactDecisionLink[]
   // Captures the dialogue/context arc that led to this entry — richer than just Q+A
   reasoningArc           String?
   // FK to RefiningSession — populated in Phase 2 when a session is used before settling

@@ -5,6 +5,7 @@ import sensible from "@fastify/sensible";
 import { promptRoutes } from "./routes/prompts.js";
 import { questionRoutes } from "./routes/questions.js";
 import { decisionRoutes } from "./routes/decisions.js";
+import { artifactRoutes } from "./routes/artifacts.js";
 import { slackRoutes } from "./routes/slack.js";
 import { boltApp } from "./slack/bolt-app.js";
 
@@ -16,6 +17,7 @@ await app.register(sensible);
 await app.register(promptRoutes, { prefix: "/api" });
 await app.register(questionRoutes, { prefix: "/api" });
 await app.register(decisionRoutes, { prefix: "/api" });
+await app.register(artifactRoutes, { prefix: "/api" });
 await app.register(slackRoutes, { prefix: "/api" });
 
 app.get("/health", async () => ({

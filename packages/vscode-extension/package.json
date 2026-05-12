@@ -2,7 +2,7 @@
   "name": "reasoning-layer",
   "displayName": "Reasoning Layer",
   "description": "Async stakeholder clarification for AI-assisted development — surfaces ambiguity, routes questions to Slack, and injects past decisions as context.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "reasoning-layer",
   "engines": {
     "vscode": "^1.85.0"
@@ -44,6 +44,22 @@
       {
         "command": "reasoning-layer.initializeRepo",
         "title": "Reasoning Layer: Initialize for this Repo"
+      },
+      {
+        "command": "reasoning-layer.initArtifacts",
+        "title": "Reasoning Layer: Init Artifacts"
+      },
+      {
+        "command": "reasoning-layer.trackCurrentFile",
+        "title": "Reasoning Layer: Track Current File"
+      },
+      {
+        "command": "reasoning-layer.checkDrift",
+        "title": "Reasoning Layer: Check Artifact Drift"
+      },
+      {
+        "command": "reasoning-layer.generateCoherenceHook",
+        "title": "Reasoning Layer: Generate Coherence Hook"
       }
     ],
     "configuration": {
@@ -64,6 +80,12 @@
           "default": "",
           "description": "Deprecated — use developerSlackId instead.",
           "deprecationMessage": "Use reasoning-layer.developerSlackId instead."
+        },
+        "reasoning-layer.hookMode": {
+          "type": "string",
+          "enum": ["warn", "block"],
+          "default": "warn",
+          "description": "Coherence hook behaviour on drift: 'warn' prints a warning but allows the commit; 'block' exits non-zero and prevents the commit."
         }
       }
     }

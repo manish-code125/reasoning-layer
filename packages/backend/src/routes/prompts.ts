@@ -239,6 +239,7 @@ export const promptRoutes: FastifyPluginAsync = async (app) => {
 
       const limit = Math.min(parseInt(req.query.limit ?? "5", 10), 10);
 
+      // Pass 1 — semantic similarity search over all decisions for this repo
       const { results, mode } = await findSimilarDecisions({
         text: prompt.content,
         repoId: prompt.repoId ?? undefined,
@@ -246,7 +247,52 @@ export const promptRoutes: FastifyPluginAsync = async (app) => {
         limit,
       });
 
-      const enriched = buildEnrichedPrompt(prompt.content, results);
+      // Pass 2 — tracked artifact constraints
+      // If the prompt has an open file path that is a tracked artifact, prepend
+      // its linked decisions as hard constraints (regardless of semantic score).
+      const artifactConstraints: Array<{ file_path: string; decisions: typeof results }> = [];
+      if (prompt.repoId && prompt.openFilePath) {
+        const artifact = await prisma.trackedArtifact.findUnique({
+          where: { repoId_filePath: { repoId: prompt.repoId, filePath: prompt.openFilePath } },
+          include: {
+            links: {
+              include: {
+                decision: {
+                  select: {
+                    id: true,
+                    hexId: true,
+                    entryType: true,
+                    questionText: true,
+                    answer: true,
+                    rationale: true,
+                    supersededById: true,
+                    createdAt: true,
+                  },
+                },
+              },
+              orderBy: { decision: { createdAt: "desc" } },
+            },
+          },
+        });
+
+        if (artifact?.links.length) {
+          artifactConstraints.push({
+            file_path: artifact.filePath,
+            decisions: artifact.links.map((l) => ({
+              decision_id: l.decision.id,
+              hex_id: l.decision.hexId,
+              entry_type: l.decision.entryType,
+              question_text: l.decision.questionText,
+              answer: l.decision.answer,
+              rationale: l.decision.rationale ?? null,
+              score: 1.0,  // artifact constraints are always maximal relevance
+              superseded: !!l.decision.supersededById,
+            })),
+          });
+        }
+      }
+
+      const enriched = buildEnrichedPrompt(prompt.content, results, artifactConstraints);
 
       await prisma.prompt.update({
         where: { id: prompt.id },
@@ -257,8 +303,10 @@ export const promptRoutes: FastifyPluginAsync = async (app) => {
         prompt_id: prompt.id,
         enriched_prompt: enriched,
         relevant_decisions: results,
+        artifact_constraints: artifactConstraints,
         mode,
         decisions_injected: results.length,
+        artifact_constraints_injected: artifactConstraints.reduce((n, c) => n + c.decisions.length, 0),
       };
     }
   );
@@ -359,25 +407,59 @@ type DecisionResult = {
   similarity: number;
 };
 
-function buildEnrichedPrompt(originalPrompt: string, decisions: DecisionResult[]): string {
-  if (decisions.length === 0) return originalPrompt;
+type ArtifactConstraint = {
+  file_path: string;
+  decisions: Array<{ hex_id: string; entry_type: string; question_text: string; answer: string; rationale: string | null; superseded?: boolean }>;
+};
 
-  const lines: string[] = [
-    "## Relevant Past Architectural Decisions",
-    "The following decisions have been made in this codebase. Apply them when relevant.",
-    "",
-  ];
+function buildEnrichedPrompt(
+  originalPrompt: string,
+  decisions: DecisionResult[],
+  artifactConstraints: ArtifactConstraint[] = [],
+): string {
+  if (decisions.length === 0 && artifactConstraints.length === 0) return originalPrompt;
 
-  decisions.forEach((d, i) => {
-    lines.push(`### Decision ${i + 1} (similarity: ${d.similarity.toFixed(2)})`);
-    lines.push(`**Q:** ${d.question_text}`);
-    lines.push(`**A:** ${d.answer}`);
-    if (d.rationale) lines.push(`*Rationale:* ${d.rationale}`);
-    if (d.linked_files.length > 0) lines.push(`*Files:* ${d.linked_files.join(", ")}`);
-    if (d.linked_repo) lines.push(`*Repo:* ${d.linked_repo}`);
+  const lines: string[] = [];
+
+  // Artifact constraints come first — they are hard constraints tied to the open file
+  if (artifactConstraints.length > 0) {
+    lines.push("## Hard Constraints — Tracked File Decisions");
+    lines.push("These decisions directly govern the file you are editing. Treat them as non-negotiable constraints.");
     lines.push("");
-  });
 
-  lines.push("---", "", "## Developer Request", "", originalPrompt);
+    for (const constraint of artifactConstraints) {
+      lines.push(`### File: \`${constraint.file_path}\``);
+      for (const d of constraint.decisions) {
+        const supersededNote = d.superseded ? " ⚠️ **SUPERSEDED — check for a rollback entry**" : "";
+        lines.push(`- **\`${d.hex_id}\`** [${d.entry_type}]${supersededNote}`);
+        lines.push(`  **Q:** ${d.question_text}`);
+        lines.push(`  **A:** ${d.answer}`);
+        if (d.rationale) lines.push(`  *Rationale:* ${d.rationale}`);
+        lines.push("");
+      }
+    }
+    lines.push("---", "");
+  }
+
+  // Semantic search results — relevant but not necessarily tied to the open file
+  if (decisions.length > 0) {
+    lines.push("## Relevant Past Decisions");
+    lines.push("Apply these when relevant — they represent settled architectural choices for this codebase.");
+    lines.push("");
+
+    decisions.forEach((d, i) => {
+      lines.push(`### Decision ${i + 1} (similarity: ${d.similarity.toFixed(2)})`);
+      lines.push(`**Q:** ${d.question_text}`);
+      lines.push(`**A:** ${d.answer}`);
+      if (d.rationale) lines.push(`*Rationale:* ${d.rationale}`);
+      if (d.linked_files.length > 0) lines.push(`*Files:* ${d.linked_files.join(", ")}`);
+      if (d.linked_repo) lines.push(`*Repo:* ${d.linked_repo}`);
+      lines.push("");
+    });
+
+    lines.push("---", "");
+  }
+
+  lines.push("## Developer Request", "", originalPrompt);
   return lines.join("\n");
 }

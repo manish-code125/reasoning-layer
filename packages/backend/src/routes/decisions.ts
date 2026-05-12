@@ -372,4 +372,70 @@ export const decisionRoutes: FastifyPluginAsync = async (app) => {
       results,
     };
   });
+
+  // Link a decision to one or more tracked artifact file paths.
+  // Creates TrackedArtifact rows if they don't exist yet (auto-track on link).
+  app.post<{ Params: { id: string } }>("/decisions/:id/link-artifacts", async (req, reply) => {
+    const parsed = z.object({
+      file_paths: z.array(z.string().min(1)).min(1),
+      repo_path: z.string().optional(),
+    }).safeParse(req.body);
+    if (!parsed.success) return reply.badRequest(parsed.error.message);
+
+    const decision = await prisma.decision.findUnique({ where: { id: req.params.id } });
+    if (!decision) return reply.notFound("Decision not found");
+
+    // Resolve repo — use decision's repoId if available, else fall back to repo_path param
+    let repoId = decision.repoId;
+    if (!repoId && parsed.data.repo_path) {
+      const { upsertRepo } = await import("../db/repos.js");
+      repoId = await upsertRepo(parsed.data.repo_path);
+    }
+    if (!repoId) return reply.badRequest("Cannot resolve repo — provide repo_path or ensure the decision has a linked repo");
+
+    const linked = [];
+    for (const filePath of parsed.data.file_paths) {
+      // Auto-create TrackedArtifact if not yet tracked
+      const artifact = await prisma.trackedArtifact.upsert({
+        where: { repoId_filePath: { repoId, filePath } },
+        create: { repoId, filePath },
+        update: {},
+      });
+
+      // Create the link (ignore if already exists)
+      await prisma.artifactDecisionLink.upsert({
+        where: { artifactId_decisionId: { artifactId: artifact.id, decisionId: decision.id } },
+        create: { artifactId: artifact.id, decisionId: decision.id },
+        update: {},
+      });
+
+      linked.push({ artifact_id: artifact.id, file_path: filePath });
+    }
+
+    return reply.code(201).send({ decision_id: decision.id, linked });
+  });
+
+  // Unlink a decision from specific file paths.
+  app.delete<{ Params: { id: string } }>("/decisions/:id/link-artifacts", async (req, reply) => {
+    const parsed = z.object({
+      file_paths: z.array(z.string().min(1)).min(1),
+    }).safeParse(req.body);
+    if (!parsed.success) return reply.badRequest(parsed.error.message);
+
+    const decision = await prisma.decision.findUnique({ where: { id: req.params.id } });
+    if (!decision) return reply.notFound("Decision not found");
+
+    const artifacts = await prisma.trackedArtifact.findMany({
+      where: { filePath: { in: parsed.data.file_paths }, repoId: decision.repoId ?? undefined },
+    });
+
+    await prisma.artifactDecisionLink.deleteMany({
+      where: {
+        decisionId: decision.id,
+        artifactId: { in: artifacts.map((a) => a.id) },
+      },
+    });
+
+    return reply.code(204).send();
+  });
 };
