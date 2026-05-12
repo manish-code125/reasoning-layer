@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.local
+postgres_data/
+.DS_Store
+*.js.map
+prisma/migrations/

@@ -1,0 +1,18 @@
+packages:
+  - packages/*
+
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  '@vscode/vsce-sign': set this to true or false
+  esbuild: true
+  keytar: set this to true or false
+  prisma: true
+  sharp: true
+
+onlyBuiltDependencies:
+  - "@prisma/client"
+  - "@prisma/engines"
+  - esbuild
+  - prisma
+  - sharp

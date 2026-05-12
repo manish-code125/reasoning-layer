@@ -1,0 +1,10 @@
+{
+  "/_not-found/page": "/_not-found",
+  "/api/auth/login/route": "/api/auth/login",
+  "/api/reasoning/[...path]/route": "/api/reasoning/[...path]",
+  "/api/auth/logout/route": "/api/auth/logout",
+  "/login/page": "/login",
+  "/traces/[id]/page": "/traces/[id]",
+  "/page": "/",
+  "/traces/page": "/traces"
+}

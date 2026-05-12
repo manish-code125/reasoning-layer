@@ -1,0 +1,109 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// A git repository tracked by this tool — the unit of isolation for decisions and prompts.
+// Created automatically on first prompt submission for a given path.
+model Repo {
+  id        String     @id @default(uuid())
+  path      String     @unique   // absolute or relative path used as the stable identifier
+  name      String?              // optional display name
+  createdAt DateTime   @default(now())
+  prompts   Prompt[]
+  decisions Decision[]
+
+  @@map("repos")
+}
+
+// A developer prompt submitted for architectural analysis
+model Prompt {
+  id             String     @id @default(uuid())
+  content        String
+  repoPath       String?    // kept for backwards compat — prefer repoId going forward
+  repoId         String?
+  repo           Repo?      @relation(fields: [repoId], references: [id])
+  openFilePath   String?
+  language       String?
+  fileTree       Json?
+  readmeSnippet  String?
+  // pending → analyzing → analyzed → enriched
+  status         String     @default("pending")
+  // PromptAnalysis shape — populated by Phase 2 LLM pipeline
+  analysis       Json?
+  // Enriched prompt string with injected decision context — populated by Phase 5
+  enrichedPrompt String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  questions      Question[]
+
+  @@map("prompts")
+}
+
+// A clarification question generated from a prompt
+model Question {
+  id                 String    @id @default(uuid())
+  promptId           String
+  prompt             Prompt    @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  text               String
+  // architectural | product | infra | compliance | ux
+  category           String?
+  // low | medium | high | critical — drives escalation threshold in Phase 3
+  riskLevel          String    @default("medium")
+  // unanswered | answered_locally | routed | resolved
+  status             String    @default("unanswered")
+  localAnswer        String?
+  slackRouted        Boolean   @default(false)
+  slackMessageTs     String?
+  slackChannel       String?
+  // LLM hint at what Stoa entry type this question will likely produce
+  suggestedEntryType String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  decision           Decision?
+
+  @@map("questions")
+}
+
+// A persisted architectural or product decision — the long-term memory store.
+// Immutable append-only: decisions are never updated after creation.
+// To revise a decision, create a new entry with entryType="rollback" and supersededById pointing here.
+// decisionNumber is a sequential integer assigned by a DB sequence — used for ADR references.
+// hexId is a stable 7-char cross-reference ID (Stoa WAL style).
+// questionId is nullable to support manually seeded historical decisions.
+model Decision {
+  id                     String     @id @default(uuid())
+  decisionNumber         Int        @unique @default(dbgenerated("nextval('decision_number_seq'::regclass)")) @map("decision_number")
+  // 7-char stable ID for cross-referencing in decision.log.md (e.g. "a3f2e71")
+  hexId                  String     @unique
+  // Stoa entry types: decision | wont_do | table | branch | rollback | observation
+  entryType              String     @default("decision")
+  questionId             String?    @unique
+  question               Question?  @relation(fields: [questionId], references: [id])
+  questionText           String
+  answer                 String
+  alternativesConsidered String?
+  rationale              String?
+  // When should this decision be revisited? (e.g. "if we add multi-tenancy")
+  reopenCondition        String?
+  // Points to the Decision this entry supersedes (rollback type only)
+  supersededById         String?
+  supersededBy           Decision?  @relation("Supersession", fields: [supersededById], references: [id])
+  supersedes             Decision[] @relation("Supersession")
+  reviewerSlackId        String?
+  linkedFiles            String[]
+  linkedRepo             String?    // kept for backwards compat — prefer repoId going forward
+  repoId                 String?
+  repo                   Repo?      @relation(fields: [repoId], references: [id])
+  // 1536-dim embedding for pgvector similarity search — populated in Phase 4
+  embedding              Unsupported("vector(1536)")?
+  createdAt              DateTime   @default(now())
+
+  @@map("decisions")
+}

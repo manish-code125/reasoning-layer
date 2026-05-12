@@ -1,0 +1,84 @@
+{
+  "name": "reasoning-layer",
+  "displayName": "Reasoning Layer",
+  "description": "Async stakeholder clarification for AI-assisted development — surfaces ambiguity, routes questions to Slack, and injects past decisions as context.",
+  "version": "0.2.0",
+  "publisher": "reasoning-layer",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "workspaceContains:.git"
+  ],
+  "icon": "media/icon.png",
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "reasoning-layer.analyzePrompt",
+        "title": "Reasoning Layer: Analyze Prompt"
+      },
+      {
+        "command": "reasoning-layer.listPending",
+        "title": "Reasoning Layer: List Pending Questions"
+      },
+      {
+        "command": "reasoning-layer.enrichContext",
+        "title": "Reasoning Layer: Enrich with Past Decisions"
+      },
+      {
+        "command": "reasoning-layer.viewDecisions",
+        "title": "Reasoning Layer: View Decision Log"
+      },
+      {
+        "command": "reasoning-layer.syncLog",
+        "title": "Reasoning Layer: Sync Decision Log to Git"
+      },
+      {
+        "command": "reasoning-layer.supersedeDecision",
+        "title": "Reasoning Layer: Supersede a Decision (Rollback)"
+      },
+      {
+        "command": "reasoning-layer.initializeRepo",
+        "title": "Reasoning Layer: Initialize for this Repo"
+      }
+    ],
+    "configuration": {
+      "title": "Reasoning Layer",
+      "properties": {
+        "reasoning-layer.backendUrl": {
+          "type": "string",
+          "default": "http://44.200.186.86/reasoning",
+          "description": "Base URL of the reasoning-layer backend (no trailing slash)."
+        },
+        "reasoning-layer.developerSlackId": {
+          "type": "string",
+          "default": "",
+          "description": "Your Slack user ID (e.g. U0B2TFPCRBN) — used to @-mention you in routed questions."
+        },
+        "reasoning-layer.defaultSlackUserId": {
+          "type": "string",
+          "default": "",
+          "description": "Deprecated — use developerSlackId instead.",
+          "deprecationMessage": "Use reasoning-layer.developerSlackId instead."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "dev": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "node esbuild.js && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3"
+  }
+}

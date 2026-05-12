@@ -1,0 +1,15 @@
+{
+  "name": "reasoning-layer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @reasoning-layer/backend dev",
+    "build": "pnpm --filter @reasoning-layer/backend build",
+    "db:migrate": "pnpm --filter @reasoning-layer/backend db:migrate",
+    "db:generate": "pnpm --filter @reasoning-layer/backend db:generate",
+    "db:studio": "pnpm --filter @reasoning-layer/backend db:studio",
+    "ui:dev": "pnpm --filter @reasoning-layer/ui dev",
+    "ui:build": "pnpm --filter @reasoning-layer/ui build",
+    "ui:start": "pnpm --filter @reasoning-layer/ui start"
+  }
+}

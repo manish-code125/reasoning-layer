@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s* http://44.200.186.86/*)",
+      "Bash(curl -s* http://localhost:3002/*)",
+      "Bash(git add decision.log.md*)",
+      "Bash(git add .gitattributes*)",
+      "Bash(git commit -m \"decisions:*\")",
+      "Bash(git log -1 --format=%aI -- decision.log.md*)"
+    ]
+  }
+}
