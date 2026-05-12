@@ -101,6 +101,10 @@ model Decision {
   linkedRepo             String?    // kept for backwards compat — prefer repoId going forward
   repoId                 String?
   repo                   Repo?      @relation(fields: [repoId], references: [id])
+  // Captures the dialogue/context arc that led to this entry — richer than just Q+A
+  reasoningArc           String?
+  // FK to RefiningSession — populated in Phase 2 when a session is used before settling
+  sessionId              String?
   // 1536-dim embedding for pgvector similarity search — populated in Phase 4
   embedding              Unsupported("vector(1536)")?
   createdAt              DateTime   @default(now())

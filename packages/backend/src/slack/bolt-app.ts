@@ -98,6 +98,7 @@ boltApp.event("message", async ({ event, client }: any) => {
       linkedRepo: matched.prompt.repoPath ?? null,
       repoId: repoId ?? null,
       linkedFiles: matched.prompt.openFilePath ? [matched.prompt.openFilePath] : [],
+      reasoningArc: null,  // thread replies are fast-path — no dialogue arc captured
     },
   });
 
@@ -159,6 +160,19 @@ boltApp.view("answer_question_modal", async ({ ack, body, view, client }) => {
       return;
     }
 
+    // Validate rollback entries must reference a valid prior decision
+    if (entryType === "rollback" && !supersedesId) {
+      console.error(`[bolt] modal submit: rollback entry requires supersedes_id`);
+      return;
+    }
+    if (supersedesId) {
+      const target = await prisma.decision.findUnique({ where: { id: supersedesId } });
+      if (!target) {
+        console.error(`[bolt] modal submit: supersedes_id ${supersedesId} does not match any existing decision`);
+        return;
+      }
+    }
+
     const existing = await prisma.decision.findUnique({ where: { questionId } });
     await prisma.question.update({ where: { id: questionId }, data: { status: "resolved" } });
     if (!existing) {
@@ -181,6 +195,7 @@ boltApp.view("answer_question_modal", async ({ ack, body, view, client }) => {
           linkedRepo: question.prompt.repoPath ?? null,
           repoId: repoId ?? null,
           linkedFiles: question.prompt.openFilePath ? [question.prompt.openFilePath] : [],
+          reasoningArc: null,  // modal is fast-path — no dialogue arc; Phase 2 sessions will populate this
         },
       });
     }

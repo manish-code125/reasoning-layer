@@ -15,6 +15,7 @@ const AnswerBody = z.object({
   reopen_condition: z.string().optional(),
   // Required when entry_type === "rollback" — points to the Decision being superseded
   supersedes_id: z.string().optional(),
+  reasoning_arc: z.string().optional(),
 });
 
 const RouteToSlackBody = z.object({
@@ -124,7 +125,7 @@ export const questionRoutes: FastifyPluginAsync = async (app) => {
     const existingDecision = await prisma.decision.findUnique({ where: { questionId: req.params.id } });
     if (existingDecision) return reply.code(409).send({ statusCode: 409, error: "Conflict", message: "Decision already recorded for this question. To revise it, create a rollback entry with supersedes_id pointing to the existing decision." });
 
-    const { entry_type, answer, rationale, alternatives_considered, reopen_condition, supersedes_id } = parsed.data;
+    const { entry_type, answer, rationale, alternatives_considered, reopen_condition, supersedes_id, reasoning_arc } = parsed.data;
 
     // rollback entries must reference a valid prior decision
     if (entry_type === "rollback") {
@@ -153,6 +154,7 @@ export const questionRoutes: FastifyPluginAsync = async (app) => {
         linkedRepo: question.prompt.repoPath ?? null,
         repoId: question.prompt.repoId ?? null,
         linkedFiles: question.prompt.openFilePath ? [question.prompt.openFilePath] : [],
+        reasoningArc: reasoning_arc ?? null,
       },
     });
 

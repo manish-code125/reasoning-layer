@@ -18,6 +18,7 @@ const CreateDecisionBody = z.object({
   reviewer_slack_id: z.string().optional(),
   linked_files: z.array(z.string()).default([]),
   linked_repo: z.string().optional(),
+  reasoning_arc: z.string().optional(),
 });
 
 type DecisionSelectResult = {
@@ -35,6 +36,8 @@ type DecisionSelectResult = {
   linkedFiles: string[];
   linkedRepo: string | null;
   repoId: string | null;
+  reasoningArc: string | null;
+  sessionId: string | null;
   createdAt: Date;
 };
 
@@ -54,6 +57,8 @@ function toRow(d: DecisionSelectResult): DecisionRow & { decision_number: number
     linked_files: d.linkedFiles,
     linked_repo: d.linkedRepo,
     repo_id: d.repoId,
+    reasoning_arc: d.reasoningArc,
+    session_id: d.sessionId,
     created_at: d.createdAt.toISOString(),
   };
 }
@@ -74,6 +79,8 @@ const decisionSelect = {
   linkedFiles: true,
   linkedRepo: true,
   repoId: true,
+  reasoningArc: true,
+  sessionId: true,
   createdAt: true,
 } as const;
 
@@ -140,6 +147,11 @@ function formatAdr(decisions: DecisionRow[]): string {
     }
     if (d.reopen_condition) {
       lines.push(`**Revisit if:** ${d.reopen_condition}`);
+      lines.push("");
+    }
+    if (d.reasoning_arc) {
+      lines.push(`**Reasoning arc:**  `);
+      lines.push(d.reasoning_arc);
       lines.push("");
     }
     lines.push("---");
@@ -218,6 +230,7 @@ export const decisionRoutes: FastifyPluginAsync = async (app) => {
         linkedFiles: d.linked_files,
         linkedRepo: d.linked_repo ?? null,
         repoId: repoId ?? null,
+        reasoningArc: d.reasoning_arc ?? null,
       },
       select: decisionSelect,
     });
@@ -313,6 +326,7 @@ export const decisionRoutes: FastifyPluginAsync = async (app) => {
           if (d.rationale) lines.push(`*Rationale:* ${d.rationale}`, ``);
           if (d.alternativesConsidered) lines.push(`*Alternatives considered:* ${d.alternativesConsidered}`, ``);
           if (d.reopenCondition) lines.push(`*Revisit if:* ${d.reopenCondition}`, ``);
+          if (d.reasoningArc) lines.push(`*Reasoning arc:* ${d.reasoningArc}`, ``);
           if (d.supersededBy) {
             const supNum = String(d.supersededBy.decisionNumber).padStart(3, "0");
             lines.push(`*Supersedes:* ADR-${supNum} · \`${d.supersededBy.hexId}\``, ``);

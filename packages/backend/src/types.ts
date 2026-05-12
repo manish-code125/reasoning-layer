@@ -35,5 +35,7 @@ export interface DecisionRow {
   linked_files: string[];
   linked_repo: string | null;
   repo_id: string | null;
+  reasoning_arc: string | null;
+  session_id: string | null;
   created_at: string;
 }
