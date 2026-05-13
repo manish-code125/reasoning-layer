@@ -21,6 +21,8 @@ const AnswerBody = z.object({
 const RouteToSlackBody = z.object({
   reviewer_slack_id: z.string().optional(),
   developer_slack_id: z.string().optional(),
+  // Developer's working assumption while awaiting the reviewer's answer
+  assumption: z.string().optional(),
 });
 
 const BatchRouteBody = z.object({
@@ -199,15 +201,40 @@ export const questionRoutes: FastifyPluginAsync = async (app) => {
       );
     }
 
-    // If Slack is not configured, fall back gracefully so Phase 1/2 still work
+    // If Slack is not configured, fall back gracefully — still open a session + write interim entry
     if (!process.env.SLACK_BOT_TOKEN || !process.env.SLACK_ESCALATION_CHANNEL) {
-      await prisma.question.update({
-        where: { id: req.params.id },
-        data: { slackRouted: true, status: "routed" },
+      const assumption = parsed.data.assumption ?? "proceeding with best judgment while awaiting reviewer input";
+      const interimHexId = Math.random().toString(16).slice(2, 9);
+      const interimDecision = await prisma.decision.create({
+        data: {
+          hexId: interimHexId,
+          entryType: "table",
+          questionId: question.id,
+          questionText: question.text,
+          answer: `In-flight — ${assumption}`,
+          rationale: "Routing skipped (Slack not configured). Triggers to revisit: answer provided via API.",
+          linkedRepo: question.prompt.repoPath ?? null,
+          repoId: question.prompt.repoId ?? null,
+          linkedFiles: question.prompt.openFilePath ? [question.prompt.openFilePath] : [],
+        },
       });
+      const session = await prisma.refiningSession.create({
+        data: {
+          promptId: question.promptId,
+          questionId: question.id,
+          topic: question.text.slice(0, 120),
+          status: "open",
+          interimDecisionId: interimDecision.id,
+        },
+      });
+      await prisma.decision.update({ where: { id: interimDecision.id }, data: { sessionId: session.id } });
+      await prisma.question.update({ where: { id: req.params.id }, data: { slackRouted: true, status: "routed" } });
       return {
         question_id: question.id,
         status: "routed",
+        session_id: session.id,
+        interim_decision_id: interimDecision.id,
+        assumption,
         note: "Slack not configured — set SLACK_BOT_TOKEN and SLACK_ESCALATION_CHANNEL to enable real posting",
       };
     }
@@ -223,6 +250,42 @@ export const questionRoutes: FastifyPluginAsync = async (app) => {
       developerSlackId: parsed.data.developer_slack_id,
       questionNumber: 1,
       totalQuestions: 1,
+    });
+
+    const assumption = parsed.data.assumption ?? "proceeding with best judgment while awaiting reviewer input";
+    const interimHexId = Math.random().toString(16).slice(2, 9);
+
+    // Write interim table WAL entry — developer proceeds with this assumption while session is open
+    const interimDecision = await prisma.decision.create({
+      data: {
+        hexId: interimHexId,
+        entryType: "table",
+        questionId: question.id,
+        questionText: question.text,
+        answer: `In-flight — ${assumption}`,
+        rationale: `Routed to reviewer via Slack. Triggers to revisit: Slack answer lands.`,
+        linkedRepo: question.prompt.repoPath ?? null,
+        repoId: question.prompt.repoId ?? null,
+        linkedFiles: question.prompt.openFilePath ? [question.prompt.openFilePath] : [],
+        reasoningArc: null,
+      },
+    });
+
+    // Open a RefiningSession — stays open until reviewer settles
+    const session = await prisma.refiningSession.create({
+      data: {
+        promptId: question.promptId,
+        questionId: question.id,
+        topic: question.text.slice(0, 120),
+        status: "open",
+        interimDecisionId: interimDecision.id,
+      },
+    });
+
+    // Link the interim decision to the session
+    await prisma.decision.update({
+      where: { id: interimDecision.id },
+      data: { sessionId: session.id },
     });
 
     await prisma.question.update({
@@ -241,6 +304,9 @@ export const questionRoutes: FastifyPluginAsync = async (app) => {
       slack_channel: channel,
       slack_message_ts: ts,
       reviewer_slack_id: reviewerSlackId,
+      session_id: session.id,
+      interim_decision_id: interimDecision.id,
+      assumption,
     });
   });
 
@@ -294,6 +360,37 @@ export const questionRoutes: FastifyPluginAsync = async (app) => {
         // Capture the session ts from the first post so subsequent questions thread under it
         if (!sessionTs) sessionTs = newSessionTs;
 
+        // Write interim table WAL entry + open RefiningSession for each routed question
+        const interimHexId = Math.random().toString(16).slice(2, 9);
+        const interimDecision = await prisma.decision.create({
+          data: {
+            hexId: interimHexId,
+            entryType: "table",
+            questionId: question.id,
+            questionText: question.text,
+            answer: "In-flight — proceeding with best judgment while awaiting reviewer input",
+            rationale: "Routed to reviewer via Slack. Triggers to revisit: Slack answer lands.",
+            linkedRepo: question.prompt.repoPath ?? null,
+            repoId: question.prompt.repoId ?? null,
+            linkedFiles: question.prompt.openFilePath ? [question.prompt.openFilePath] : [],
+          },
+        });
+
+        const refSession = await prisma.refiningSession.create({
+          data: {
+            promptId: question.promptId,
+            questionId: question.id,
+            topic: question.text.slice(0, 120),
+            status: "open",
+            interimDecisionId: interimDecision.id,
+          },
+        });
+
+        await prisma.decision.update({
+          where: { id: interimDecision.id },
+          data: { sessionId: refSession.id },
+        });
+
         await prisma.question.update({
           where: { id: question.id },
           data: { slackRouted: true, status: "routed", slackChannel: channel, slackMessageTs: ts },
@@ -304,6 +401,8 @@ export const questionRoutes: FastifyPluginAsync = async (app) => {
           reviewer_slack_id: reviewerSlackId,
           slack_message_ts: ts,
           session_ts: sessionTs,
+          session_id: refSession.id,
+          interim_decision_id: interimDecision.id,
         });
       }
     }

@@ -7,6 +7,8 @@ import { questionRoutes } from "./routes/questions.js";
 import { decisionRoutes } from "./routes/decisions.js";
 import { artifactRoutes } from "./routes/artifacts.js";
 import { slackRoutes } from "./routes/slack.js";
+import { sessionRoutes } from "./routes/sessions.js";
+import { repoRoutes } from "./routes/repos.js";
 import { boltApp } from "./slack/bolt-app.js";
 
 const app = Fastify({ logger: { level: "info" } });
@@ -19,6 +21,8 @@ await app.register(questionRoutes, { prefix: "/api" });
 await app.register(decisionRoutes, { prefix: "/api" });
 await app.register(artifactRoutes, { prefix: "/api" });
 await app.register(slackRoutes, { prefix: "/api" });
+await app.register(sessionRoutes, { prefix: "/api" });
+await app.register(repoRoutes, { prefix: "/api" });
 
 app.get("/health", async () => ({
   status: "ok",

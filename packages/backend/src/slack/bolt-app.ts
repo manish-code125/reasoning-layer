@@ -35,8 +35,9 @@ boltApp.action("answer_question", async ({ ack, body, client }) => {
 });
 
 // ── Thread reply listener ──────────────────────────────────────────────────────
-// Questions are posted as thread replies to a session message.
-// Reviewers reply within that same thread — we match by slackMessageTs (the question's own ts).
+// Phase 2 async model: replies accumulate as SessionMessage turns.
+// Settling requires an explicit prefix: /settle, /table, or /wont-do.
+// Until settled, no WAL entry is written — developer already has an interim table entry.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 boltApp.event("message", async ({ event, client }: any) => {
   // Only thread replies; ignore top-level posts, bot messages, edits, deletes
@@ -47,94 +48,203 @@ boltApp.event("message", async ({ event, client }: any) => {
 
   console.log(`[bolt] thread reply: channel=${event.channel} thread_ts=${event.thread_ts} ts=${event.ts} user=${event.user}`);
 
-  // Match by the question's own message ts (question is posted as a thread reply,
-  // so its ts !== thread_ts; we stored it in slackMessageTs when routing).
   const question = await prisma.question.findFirst({
-    where: {
-      slackMessageTs: event.ts === event.thread_ts ? event.thread_ts : event.thread_ts,
-      slackChannel: event.channel,
-      status: { notIn: ["resolved", "answered_locally"] },
-    },
-    include: { prompt: true },
-  });
-
-  // Also try matching by the parent thread ts in case the question IS the thread parent
-  const questionByParent = question ?? await prisma.question.findFirst({
     where: {
       slackMessageTs: event.thread_ts,
       slackChannel: event.channel,
       status: { notIn: ["resolved", "answered_locally"] },
     },
-    include: { prompt: true },
+    include: {
+      prompt: true,
+      refiningSession: {
+        include: { messages: { orderBy: { createdAt: "asc" } } },
+      },
+    },
   });
 
-  const matched = questionByParent;
-  if (!matched) {
+  if (!question) {
     console.log(`[bolt] no open question found for thread_ts=${event.thread_ts} channel=${event.channel}`);
     return;
   }
 
-  const existing = await prisma.decision.findUnique({ where: { questionId: matched.id } });
-  if (existing) {
-    console.log(`[bolt] question ${matched.id} already answered — ignoring duplicate reply`);
+  const text: string = event.text.trim();
+  const settleMatch = /^\/settle\s+(.+)/is.exec(text);
+  const tableMatch = /^\/table(?:\s+(.*))?/is.exec(text);
+  const wontDoMatch = /^\/wont-do\s+(.+)/is.exec(text);
+
+  // ── Settlement ────────────────────────────────────────────────────────────────
+  if (settleMatch || wontDoMatch) {
+    const answerText = (settleMatch?.[1] ?? wontDoMatch?.[1] ?? "").trim();
+    const entryType = wontDoMatch ? "wont_do" : "decision";
+
+    // If there's already a final decision (not interim), skip
+    const allDecisions = await prisma.decision.findMany({ where: { questionId: question.id } });
+    const finalDecision = allDecisions.find((d) => d.entryType !== "table");
+    if (finalDecision) {
+      console.log(`[bolt] question ${question.id} already settled — ignoring`);
+      return;
+    }
+
+    const session = question.refiningSession;
+
+    // Add this settle message to the session (if session exists)
+    if (session) {
+      await prisma.sessionMessage.create({
+        data: { sessionId: session.id, role: "reviewer", content: text, slackTs: event.ts },
+      });
+    }
+
+    const repoId = question.prompt.repoPath
+      ? await upsertRepo(question.prompt.repoPath).catch(() => null)
+      : question.prompt.repoId ?? null;
+
+    const allMessages = session
+      ? [...session.messages, { role: "reviewer", content: text, createdAt: new Date() }]
+      : [];
+    const reasoningArc = allMessages.length > 0
+      ? allMessages.map((m) => `${m.role}: ${m.content}`).join("\n")
+      : null;
+
+    const hexId = Math.random().toString(16).slice(2, 9);
+    const decision = await prisma.decision.create({
+      data: {
+        hexId,
+        entryType,
+        questionId: question.id,
+        questionText: question.text,
+        answer: answerText,
+        rationale: null,
+        reviewerSlackId: event.user,
+        linkedRepo: question.prompt.repoPath ?? null,
+        repoId: repoId ?? null,
+        linkedFiles: question.prompt.openFilePath ? [question.prompt.openFilePath] : [],
+        reasoningArc,
+        sessionId: session?.id ?? null,
+        supersededById: session?.interimDecisionId ?? null,
+      },
+    });
+
+    await prisma.question.update({ where: { id: question.id }, data: { status: "resolved" } });
+    if (session) {
+      await prisma.refiningSession.update({
+        where: { id: session.id },
+        data: { status: "settled", outcome: entryType, settledAt: new Date() },
+      });
+    }
+
+    embedDecision(decision.id).catch((e: unknown) => console.error("[bolt] embed failed:", e));
+    console.log(`[bolt] question ${question.id} settled (${entryType}) by ${event.user}`);
+
+    // FYI DM — not a gate; developer's next session catches this up automatically
+    const devSlackId = process.env.DEVELOPER_SLACK_ID;
+    if (devSlackId && devSlackId !== event.user) {
+      await client.chat.postMessage({
+        channel: devSlackId,
+        text: `✅ *Decision landed* (\`${entryType}\`) — <@${event.user}> settled a question.\n\n*Q:* ${question.text}\n*A:* ${answerText}\n\n_Your next session will pick this up automatically via the catch-up cadence._`,
+      }).catch((e: unknown) => console.error("[bolt] DM failed:", e));
+    }
+
+    // Update the question message to settled state
+    if (question.slackChannel && question.slackMessageTs) {
+      await client.chat.update({
+        channel: question.slackChannel,
+        ts: question.slackMessageTs,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        blocks: buildAnsweredQuestionBlocks({
+          questionText: question.text,
+          category: question.category,
+          riskLevel: question.riskLevel,
+          reviewerSlackId: event.user,
+          answer: answerText,
+        }) as any,
+        text: `✅ Settled — ${question.text}`,
+      }).catch((e: unknown) => console.error("[bolt] update failed:", e));
+    }
+
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.thread_ts,
+      text: `✅ Settled. Decision recorded — \`${hexId}\`.`,
+    });
     return;
   }
 
-  const hexId = Math.random().toString(16).slice(2, 9);
-  const repoId = matched.prompt.repoPath
-    ? await upsertRepo(matched.prompt.repoPath).catch(() => null)
-    : null;
+  // ── Explicit /table ───────────────────────────────────────────────────────────
+  if (tableMatch) {
+    const rationale = tableMatch[1]?.trim() || "Explicitly tabled.";
+    const session = question.refiningSession;
 
-  await prisma.question.update({ where: { id: matched.id }, data: { status: "resolved" } });
-  await prisma.decision.create({
-    data: {
-      hexId,
-      entryType: "decision",
-      questionId: matched.id,
-      questionText: matched.text,
-      answer: event.text,
-      rationale: null,
-      reviewerSlackId: event.user,
-      linkedRepo: matched.prompt.repoPath ?? null,
-      repoId: repoId ?? null,
-      linkedFiles: matched.prompt.openFilePath ? [matched.prompt.openFilePath] : [],
-      reasoningArc: null,  // thread replies are fast-path — no dialogue arc captured
-    },
-  });
+    if (session) {
+      await prisma.sessionMessage.create({
+        data: { sessionId: session.id, role: "reviewer", content: text, slackTs: event.ts },
+      });
+      if (session.interimDecisionId) {
+        await prisma.decision.update({
+          where: { id: session.interimDecisionId },
+          data: { rationale },
+        });
+      }
+      await prisma.refiningSession.update({
+        where: { id: session.id },
+        data: { status: "tabled", outcome: "table", settledAt: new Date() },
+      });
+    }
 
-  embedDecision(matched.id).catch((e: unknown) => console.error("[bolt] embed failed:", e));
-  console.log(`[bolt] question ${matched.id} answered via thread reply by ${event.user}`);
-
-  const devSlackId = process.env.DEVELOPER_SLACK_ID;
-  if (devSlackId && devSlackId !== event.user) {
     await client.chat.postMessage({
-      channel: devSlackId,
-      text: `✅ *Decision captured* — <@${event.user}> answered in Slack.\n\n*Q:* ${matched.text}\n*A:* ${event.text}\n\n_Resume your Claude session with: "the Slack answers are in — continue with the task"_`,
-    }).catch((e: unknown) => console.error("[bolt] DM failed:", e));
+      channel: event.channel,
+      thread_ts: event.thread_ts,
+      text: `📋 Tabled. The interim assumption stays in place — revisit when ready.`,
+    });
+    return;
   }
 
-  // Update the question message to show answered state
-  if (matched.slackChannel && matched.slackMessageTs) {
-    await client.chat.update({
-      channel: matched.slackChannel,
-      ts: matched.slackMessageTs,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      blocks: buildAnsweredQuestionBlocks({
-        questionText: matched.text,
-        category: matched.category,
-        riskLevel: matched.riskLevel,
-        reviewerSlackId: event.user,
-        answer: event.text,
-      }) as any,
-      text: `✅ Answered — ${matched.text}`,
-    }).catch((e: unknown) => console.error("[bolt] update failed:", e));
-  }
+  // ── Plain reply — accumulate as SessionMessage ────────────────────────────────
+  const session = question.refiningSession;
+  if (session) {
+    await prisma.sessionMessage.create({
+      data: { sessionId: session.id, role: "reviewer", content: text, slackTs: event.ts },
+    });
+    console.log(`[bolt] turn added to session ${session.id} by ${event.user}`);
 
-  await client.chat.postMessage({
-    channel: event.channel,
-    thread_ts: event.thread_ts,
-    text: `✅ Saved. Thank you <@${event.user}>! _Reply to each remaining question in this thread._`,
-  });
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.thread_ts,
+      text: `Got it. Keep discussing, or use \`/settle <answer>\`, \`/table\`, or \`/wont-do <reason>\` to close this question.`,
+    });
+  } else {
+    // No session — fast-path legacy behavior (shouldn't happen after Phase 2, but safe fallback)
+    const existing = await prisma.decision.findUnique({ where: { questionId: question.id } });
+    if (existing) return;
+
+    const hexId = Math.random().toString(16).slice(2, 9);
+    const repoId = question.prompt.repoPath ? await upsertRepo(question.prompt.repoPath).catch(() => null) : null;
+
+    await prisma.question.update({ where: { id: question.id }, data: { status: "resolved" } });
+    const decision = await prisma.decision.create({
+      data: {
+        hexId, entryType: "decision", questionId: question.id, questionText: question.text,
+        answer: text, reviewerSlackId: event.user,
+        linkedRepo: question.prompt.repoPath ?? null, repoId: repoId ?? null,
+        linkedFiles: question.prompt.openFilePath ? [question.prompt.openFilePath] : [],
+        reasoningArc: null,
+      },
+    });
+    embedDecision(decision.id).catch((e: unknown) => console.error("[bolt] embed failed:", e));
+
+    const devSlackId = process.env.DEVELOPER_SLACK_ID;
+    if (devSlackId && devSlackId !== event.user) {
+      await client.chat.postMessage({
+        channel: devSlackId,
+        text: `✅ *Decision landed* — <@${event.user}> answered.\n\n*Q:* ${question.text}\n*A:* ${text}\n\n_Your next session will pick this up automatically._`,
+      }).catch((e: unknown) => console.error("[bolt] DM failed:", e));
+    }
+
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.thread_ts,
+      text: `✅ Saved. Thank you <@${event.user}>!`,
+    });
+  }
 });
 
 // ── Modal submit: "answer_question_modal" (with rationale) ────────────────────
@@ -207,7 +317,7 @@ boltApp.view("answer_question_modal", async ({ ack, body, view, client }) => {
     if (devSlackId && devSlackId !== reviewerSlackId) {
       await client.chat.postMessage({
         channel: devSlackId,
-        text: `✅ *Entry captured* (\`${entryType}\`) — <@${reviewerSlackId}> answered a question in your project.\n\n*Q:* ${question.text}\n*A:* ${answer}${rationale ? `\n*Rationale:* ${rationale}` : ""}${alternatives ? `\n*Alternatives:* ${alternatives}` : ""}${reopenCondition ? `\n*Revisit if:* ${reopenCondition}` : ""}\n\nRun \`/decide-log\` in your repo to commit it.`,
+        text: `✅ *Decision landed* (\`${entryType}\`) — <@${reviewerSlackId}> answered a question.\n\n*Q:* ${question.text}\n*A:* ${answer}${rationale ? `\n*Rationale:* ${rationale}` : ""}${alternatives ? `\n*Alternatives:* ${alternatives}` : ""}${reopenCondition ? `\n*Revisit if:* ${reopenCondition}` : ""}\n\n_Your next session will pick this up automatically via the catch-up cadence._`,
       }).catch((e) => console.error("[bolt] DM failed:", e));
     }
 

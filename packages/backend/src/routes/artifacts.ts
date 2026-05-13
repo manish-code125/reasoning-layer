@@ -14,6 +14,11 @@ const DriftBody = z.object({
   file_timestamps: z.record(z.string()),
 });
 
+const DriftByPathBody = z.object({
+  repo_path: z.string().min(1),
+  file_timestamps: z.record(z.string()),
+});
+
 // Resolve a repo by UUID or by path (convenience for agent file callers).
 async function resolveRepo(idOrPath: string) {
   // Try UUID first
@@ -166,6 +171,61 @@ export const artifactRoutes: FastifyPluginAsync = async (app) => {
       if (isNaN(fileDate.getTime())) continue;
 
       if (decisionTs > fileDate) {
+        drifted.push({
+          artifact_id: artifact.id,
+          file_path: artifact.filePath,
+          description: artifact.description,
+          file_last_committed_at: fileTs,
+          latest_decision: {
+            decision_id: latestLink.decision.id,
+            hex_id: latestLink.decision.hexId,
+            entry_type: latestLink.decision.entryType,
+            question_text: latestLink.decision.questionText,
+            answer: latestLink.decision.answer,
+            created_at: latestLink.decision.createdAt.toISOString(),
+            superseded: !!latestLink.decision.supersededById,
+          },
+        });
+      }
+    }
+
+    return { drifted, total_tracked: artifacts.length };
+  });
+
+  // Convenience drift endpoint — resolves repo by path in the request body.
+  // Used by the pre-commit hook to avoid URL-encoding the repo path in a route param.
+  app.post("/artifacts/drift", async (req, reply) => {
+    const parsed = DriftByPathBody.safeParse(req.body);
+    if (!parsed.success) return reply.badRequest(parsed.error.message);
+
+    const repo = await prisma.repo.findUnique({ where: { path: parsed.data.repo_path } });
+    if (!repo) return { drifted: [], total_tracked: 0 };  // repo not tracked yet — silent success
+
+    const { file_timestamps } = parsed.data;
+
+    const artifacts = await prisma.trackedArtifact.findMany({
+      where: { repoId: repo.id },
+      include: {
+        links: {
+          include: {
+            decision: {
+              select: { id: true, hexId: true, entryType: true, questionText: true, answer: true, createdAt: true, supersededById: true },
+            },
+          },
+          orderBy: { decision: { createdAt: "desc" } },
+        },
+      },
+    });
+
+    const drifted = [];
+    for (const artifact of artifacts) {
+      if (!artifact.links.length) continue;
+      const latestLink = artifact.links[0];
+      const fileTs = file_timestamps[artifact.filePath];
+      if (!fileTs) continue;
+      const fileDate = new Date(fileTs);
+      if (isNaN(fileDate.getTime())) continue;
+      if (latestLink.decision.createdAt > fileDate) {
         drifted.push({
           artifact_id: artifact.id,
           file_path: artifact.filePath,

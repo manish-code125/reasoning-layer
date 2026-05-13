@@ -266,6 +266,8 @@ export const promptRoutes: FastifyPluginAsync = async (app) => {
                     answer: true,
                     rationale: true,
                     supersededById: true,
+                    // supersedes: decisions that point AT this one — non-empty means this decision has been superseded
+                    supersedes: { select: { id: true, hexId: true } },
                     createdAt: true,
                   },
                 },
@@ -285,14 +287,46 @@ export const promptRoutes: FastifyPluginAsync = async (app) => {
               question_text: l.decision.questionText,
               answer: l.decision.answer,
               rationale: l.decision.rationale ?? null,
-              score: 1.0,  // artifact constraints are always maximal relevance
-              superseded: !!l.decision.supersededById,
+              score: 1.0,
+              // A decision is superseded when a newer decision points at it via supersededById
+              superseded: l.decision.supersedes.length > 0,
+              superseded_by: l.decision.supersedes[0]?.hexId ?? null,
             })),
           });
         }
       }
 
-      const enriched = buildEnrichedPrompt(prompt.content, results, artifactConstraints);
+      // Pass 3 — in-flight questions: routed but not yet settled, with their interim assumptions
+      const inFlightQuestions: Array<{ question_id: string; text: string; assumption: string; session_id: string }> = [];
+      if (prompt.repoId || prompt.repoPath) {
+        const openSessions = await prisma.refiningSession.findMany({
+          where: {
+            status: "open",
+            prompt: {
+              OR: [
+                ...(prompt.repoId ? [{ repoId: prompt.repoId }] : []),
+                ...(prompt.repoPath ? [{ repoPath: prompt.repoPath }] : []),
+              ],
+            },
+          },
+          include: {
+            question: { select: { id: true, text: true } },
+            decisions: { where: { entryType: "table" }, orderBy: { createdAt: "desc" }, take: 1 },
+          },
+        });
+
+        for (const session of openSessions) {
+          const interimAnswer = session.decisions[0]?.answer ?? "proceeding with best judgment";
+          inFlightQuestions.push({
+            question_id: session.questionId ?? "",
+            text: session.question?.text ?? session.topic,
+            assumption: interimAnswer,
+            session_id: session.id,
+          });
+        }
+      }
+
+      const enriched = buildEnrichedPrompt(prompt.content, results, artifactConstraints, inFlightQuestions);
 
       await prisma.prompt.update({
         where: { id: prompt.id },
@@ -304,6 +338,7 @@ export const promptRoutes: FastifyPluginAsync = async (app) => {
         enriched_prompt: enriched,
         relevant_decisions: results,
         artifact_constraints: artifactConstraints,
+        in_flight_questions: inFlightQuestions,
         mode,
         decisions_injected: results.length,
         artifact_constraints_injected: artifactConstraints.reduce((n, c) => n + c.decisions.length, 0),
@@ -412,12 +447,15 @@ type ArtifactConstraint = {
   decisions: Array<{ hex_id: string; entry_type: string; question_text: string; answer: string; rationale: string | null; superseded?: boolean }>;
 };
 
+type InFlightQuestion = { question_id: string; text: string; assumption: string; session_id: string };
+
 function buildEnrichedPrompt(
   originalPrompt: string,
   decisions: DecisionResult[],
   artifactConstraints: ArtifactConstraint[] = [],
+  inFlightQuestions: InFlightQuestion[] = [],
 ): string {
-  if (decisions.length === 0 && artifactConstraints.length === 0) return originalPrompt;
+  if (decisions.length === 0 && artifactConstraints.length === 0 && inFlightQuestions.length === 0) return originalPrompt;
 
   const lines: string[] = [];
 
@@ -430,7 +468,9 @@ function buildEnrichedPrompt(
     for (const constraint of artifactConstraints) {
       lines.push(`### File: \`${constraint.file_path}\``);
       for (const d of constraint.decisions) {
-        const supersededNote = d.superseded ? " ⚠️ **SUPERSEDED — check for a rollback entry**" : "";
+        const supersededNote = d.superseded
+          ? ` ⚠️ **SUPERSEDED by \`${(d as any).superseded_by ?? "unknown"}\` — use the newer entry**`
+          : "";
         lines.push(`- **\`${d.hex_id}\`** [${d.entry_type}]${supersededNote}`);
         lines.push(`  **Q:** ${d.question_text}`);
         lines.push(`  **A:** ${d.answer}`);
@@ -457,6 +497,20 @@ function buildEnrichedPrompt(
       lines.push("");
     });
 
+    lines.push("---", "");
+  }
+
+  // In-flight questions — working assumptions the developer is proceeding with
+  if (inFlightQuestions.length > 0) {
+    lines.push("## In-Flight Questions — Working Assumptions");
+    lines.push("These questions are awaiting reviewer input. The developer is proceeding with the stated assumption — treat it as provisional until resolved.");
+    lines.push("");
+    for (const q of inFlightQuestions) {
+      lines.push(`- **Q:** ${q.text}`);
+      lines.push(`  **Assumption:** ${q.assumption}`);
+      lines.push(`  *(session \`${q.session_id.slice(0, 8)}\` — in-flight)*`);
+      lines.push("");
+    }
     lines.push("---", "");
   }
 

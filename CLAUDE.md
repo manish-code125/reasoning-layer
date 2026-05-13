@@ -1,3 +1,5 @@
+@.claude/reasoning-layer.md
+
 @stoa.md
 
 # CLAUDE.md — Reasoning Layer
@@ -184,19 +186,22 @@ Extension ID: `reasoning-layer` · Publisher: to be registered on marketplace.vi
 - Command: `Reasoning Layer: Analyze` — takes selected text or user input, submits to backend, opens a webview panel showing the generated questions
 - Webview panel: question list with inline answer fields and "Route to Slack" buttons per question
 - Command: `Reasoning Layer: Sync Decision Log` — runs the decide-log logic (git pointer → export-since → append → commit)
-- Settings: `reasoning-layer.backendUrl`, `reasoning-layer.developerSlackId`
+- **On activation: coherence hook auto-install** — when the extension activates in a workspace, it checks for `.githooks/pre-commit`. If absent, it writes the hook file (from `scripts/pre-commit`) and runs `git config core.hooksPath .githooks` silently. A one-time status bar toast confirms: `⚡ Reasoning Layer: coherence hook installed`. No manual shell command needed.
+- Settings: `reasoning-layer.backendUrl`, `reasoning-layer.developerSlackId`, `reasoning-layer.hookMode` (`"warn"` | `"block"`, default `"warn"`)
 
 **File structure:**
 ```
 packages/vscode-extension/
 ├── src/
-│   ├── extension.ts          activate(), register commands
-│   ├── api/client.ts         fetch wrapper over backend REST API
-│   ├── panels/DecisionPanel.ts  webview panel (vanilla HTML + JS)
-│   ├── commands/analyze.ts   submit prompt → show questions
-│   └── commands/syncLog.ts   git pointer + export-since + commit
-├── package.json              contributes, activationEvents, config
-└── media/panel.css
+│   ├── extension.ts            activate(), register commands, auto-install hook
+│   ├── api/client.ts           fetch wrapper over backend REST API
+│   ├── panels/DecisionPanel.ts webview panel (vanilla HTML + JS)
+│   ├── commands/analyze.ts     submit prompt → show questions
+│   ├── commands/syncLog.ts     git pointer + export-since + commit
+│   └── hooks/installHook.ts    write .githooks/pre-commit + set hooksPath
+├── package.json                contributes, activationEvents, config
+├── media/panel.css
+└── scripts/pre-commit          the hook file bundled into the extension
 ```
 
 **How to install locally:**

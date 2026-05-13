@@ -30,30 +30,41 @@ sessions will populate it.
 
 ---
 
-## Phase 2 — Refining Session
+## Phase 2 — Async Refining Session
 
-**Goal:** A topic can evolve through multi-turn dialogue before settling into a WAL entry.
-The Slack thread becomes the refining session — each reply adds a turn, settling produces
-the WAL entry.
+**Goal:** Questions are fire-and-forget from the developer's perspective. Routing a question
+does not block the developer — they state an interim assumption and proceed immediately.
+Answers land asynchronously into the WAL and are surfaced at the next natural checkpoint,
+mirroring how Stoa's async ask pattern works.
+
+### Core mental model
+
+| Phase 1 fast path | Phase 2 async |
+|---|---|
+| Route question → wait → DM → resume | Route question → **state assumption → proceed** |
+| Answer is a gate | Answer is an event that drifts in later |
+| Developer blocked | Developer always moving |
 
 ### New schema
 
 ```prisma
 model RefiningSession {
-  id          String           @id @default(uuid())
-  promptId    String
-  prompt      Prompt           @relation(fields: [promptId], references: [id])
-  questionId  String?          @unique
-  question    Question?        @relation(fields: [questionId], references: [id])
-  topic       String           // short label for the topic being refined
-  // open | settled | branched | tabled | abandoned
-  status      String           @default("open")
+  id                String           @id @default(uuid())
+  promptId          String
+  prompt            Prompt           @relation(fields: [promptId], references: [id])
+  questionId        String?          @unique
+  question          Question?        @relation(fields: [questionId], references: [id])
+  topic             String           // short label for the topic being refined
+  // open | settled | tabled | abandoned
+  status            String           @default("open")
   // decision | wont_do | table | branch | rollback | observation
-  outcome     String?
-  createdAt   DateTime         @default(now())
-  settledAt   DateTime?
-  messages    SessionMessage[]
-  decisions   Decision[]
+  outcome           String?
+  // ID of the interim table WAL entry written when question was routed — superseded on settlement
+  interimDecisionId String?
+  createdAt         DateTime         @default(now())
+  settledAt         DateTime?
+  messages          SessionMessage[]
+  decisions         Decision[]
 
   @@map("refining_sessions")
 }
@@ -72,6 +83,15 @@ model SessionMessage {
 }
 ```
 
+### Question statuses
+
+| Status | Meaning |
+|---|---|
+| `pending` | Generated, not yet answered or routed |
+| `answered_locally` | Developer answered inline; WAL entry written immediately |
+| `routed` | Sent to Slack; interim `table` WAL entry written; developer proceeds |
+| `resolved` | Slack answer landed; final `decision` WAL entry written |
+
 ### New API endpoints
 
 | Method | Path | What it does |
@@ -79,33 +99,72 @@ model SessionMessage {
 | `POST` | `/api/sessions` | Start a refining session for a question or open topic |
 | `GET` | `/api/sessions/:id` | Full session state + message history |
 | `POST` | `/api/sessions/:id/messages` | Add a dialogue turn (developer, reviewer, or AI) |
-| `POST` | `/api/sessions/:id/settle` | Settle → creates WAL entry; `reasoning_arc` assembled from message history |
+| `POST` | `/api/sessions/:id/settle` | Settle → writes final `decision` WAL entry; sets `supersedes_id` → interim `table` entry; `reasoning_arc` assembled from full message history |
 | `POST` | `/api/sessions/:id/branch` | Decompose → creates N child sessions; parent marked `branched` |
 | `POST` | `/api/sessions/:id/table` | Defer → creates a `table` WAL entry; session marked `tabled` |
 | `POST` | `/api/sessions/:id/abandon` | Explicitly close without a WAL entry |
+| `GET` | `/api/sessions/catch-up` | `?repo=<path>&since=<iso>` — returns decisions that landed + questions still in-flight since a timestamp |
 
-### Slack flow upgrade
+### Routing flow (async)
 
-Today a Slack thread reply immediately closes the question. With sessions:
+When `POST /api/questions/:id/route` is called:
 
-- A Slack thread **is** the refining session — each reply adds a `SessionMessage`
-- Settling is triggered by a `/settle`, `/table`, or `/wont-do` reply prefix, or by clicking
-  a new **Settle** button added to the question block
-- Until settled, replies accumulate as turns and no WAL entry is written
-- The `reasoning_arc` on the final WAL entry is assembled from the full `SessionMessage` history
+1. Question is posted to the Slack thread as before
+2. A `RefiningSession` is opened with `status: "open"`
+3. **An interim `table` WAL entry is written immediately** capturing the developer's working assumption:
+   ```
+   ## <hex-id> — table — <date>
+   In-flight: <question text>
+   Proceeding with assumption: <assumption text supplied by developer>
+   Routing to: @reviewer via Slack
+   Triggers to revisit: Slack answer lands
+   ```
+4. The developer proceeds — no DM, no waiting
+
+### Settlement flow (async, reviewer-driven)
+
+When a Slack answer lands (plain reply prefixed with `/settle`, `/table`, or `/wont-do`, or via the Settle button):
+
+1. Backend writes the final WAL entry (`decision`, `wont_do`, etc.)
+2. If an interim `table` entry exists for the question, the new entry sets `supersedes_id` → that entry — the assumption is now resolved
+3. `reasoning_arc` is assembled from the full `SessionMessage` history
+4. A Slack DM is sent to the developer as **FYI only**: *"Decision landed: [summary]. Your next session will pick this up."*
+5. No developer action required to "resume"
+
+### Catch-up cadence (session start)
+
+Before Step 1 (submit task) of the pipeline, the agent calls `GET /api/sessions/catch-up`.
+Response surfaces:
+
+- **Decisions that landed** since the last session timestamp (resolved interim `table` entries)
+- **Still in-flight** questions (routed, not yet answered)
+
+Claude surfaces these before the developer describes the new task:
+
+> "Since your last session: 2 decisions landed — [summary]. 1 question is still in-flight with @reviewer — proceeding with the prior assumption."
+
+### Enrichment upgrade
+
+`GET /api/prompts/:id/enriched` gains a second pass:
+
+- Past decisions (existing semantic search) — treated as hard constraints
+- In-flight questions with their interim assumptions — flagged explicitly so Claude knows where the working assumptions live
 
 ### Fast path preserved
 
-`POST /api/questions/:id/route` with a single reply still works as before — it opens a session
-and immediately settles it. Backwards compatible; no API changes for existing callers.
+A Slack reply that starts with `/settle` on the very first reply still settles immediately —
+a session is opened and immediately closed. Backwards compatible; no API changes for existing callers.
 
-### Agent file additions (Step 2 upgrade)
+### Agent file additions (`.claude/reasoning-layer.md` v1.3.0)
 
 ```python
+# Catch-up cadence — runs before Step 1:
+GET /api/sessions/catch-up?repo=<path>&since=<last_session_ts>
+
 # After routing — Claude can participate in multi-turn sessions:
 POST /sessions/:id/messages  { "role": "ai", "content": "..." }
 
-# When session is ready to settle:
+# When session is ready to settle (reviewer-driven, not developer-driven):
 POST /sessions/:id/settle    {
   "outcome": "decision",
   "answer": "...",
@@ -116,10 +175,25 @@ POST /sessions/:id/settle    {
 
 ---
 
-## Phase 3 — Artifact Coherence
+## Phase 3 — Artifact Coherence ✅ Shipped
 
 **Goal:** Track which files in a repo are governed by which decisions. Surface drift when code
 moves ahead of the WAL. Optionally block commits to tracked files without a corresponding WAL entry.
+
+### What shipped
+
+| Change | Detail |
+|---|---|
+| `TrackedArtifact` + `ArtifactDecisionLink` schema | Files linked to decisions via junction table |
+| `GET/POST/DELETE /api/repos/:id/artifacts` | Track, list, and untrack files |
+| `POST /api/repos/:id/artifacts/drift` | Drift detection — client passes file timestamps |
+| `POST /api/artifacts/drift` | Convenience endpoint — repo path in body (used by pre-commit hook) |
+| `POST/DELETE /api/decisions/:id/link-artifacts` | Link/unlink decisions to file paths; auto-tracks if not yet tracked |
+| Enrichment Pass 2 | Linked decisions injected as hard constraints in `GET /prompts/:id/enriched` |
+| Superseded decision flag fix | Now correctly detects when a constraint has been superseded by a newer rollback entry |
+| `scripts/pre-commit` | Python3 hook — warn or block commits when staged files have unresolved drift |
+| `scripts/install-coherence-hook.sh` | One-command installer: copies hook + wires `git config core.hooksPath` |
+| Agent file v1.4.0 | Step 3b: after recording decisions, suggests linking them to tracked files |
 
 ### What it solves
 
@@ -246,62 +320,66 @@ Hook behaviour is configurable in VS Code settings:
 }
 ```
 
+### Hook installation — current state vs. target state
+
+| State | How the hook gets installed |
+|---|---|
+| **Now (bridge)** | Developer runs `bash scripts/install-coherence-hook.sh` once per repo |
+| **Extension Phase 1 (target)** | Extension `activate()` detects the workspace git root, writes `.githooks/pre-commit`, and runs `git config core.hooksPath .githooks` silently on first activation — zero extra steps |
+
+The `scripts/pre-commit` file and `scripts/install-coherence-hook.sh` are temporary. When the extension ships, the hook is bundled inside the `.vsix` and installed automatically. The shell scripts can be removed at that point.
+
 ---
 
-## Phase 4 — Agent File Coherence Cadences
+## Phase 4 — Agent File Coherence Cadences ✅ Shipped
 
 **Goal:** Add two Stoa-style coherence cadences to the Claude Code agent file
 (`.claude/reasoning-layer.md`) so drift is surfaced proactively without developer action.
 
-### Cadence A — Pre-task drift check
+### What shipped
 
-Runs **before Step 1** (before submitting the task):
+| Change | Detail |
+|---|---|
+| `GET /api/decisions/:id/linked-artifacts` | Returns tracked artifacts linked to a specific decision — used by Cadence B |
+| Agent file v1.5.0 — Step 0b (Cadence A) | Pre-task drift check: fetches all tracked artifacts, gets git timestamps, calls drift endpoint, surfaces stale decisions before task starts |
+| Agent file v1.5.0 — Step 3c (Cadence B) | Post-decision propagation pass: after recording each decision, checks linked files and asks developer to update them in the same session |
 
-```python
-# Check if any open files are tracked artifacts with stale decisions
-python3 -c "
-import json, urllib.request
-BACKEND = '{{BACKEND_URL}}'
-repo = os.getcwd()
-# Pass open file path if available
-req = urllib.request.Request(
-  BACKEND + '/api/repos/by-path/artifacts/drift?repo=' + repo,
-  headers={'Content-Type': 'application/json'}, method='GET')
-result = json.loads(urllib.request.urlopen(req).read())
-if result['drifted']:
-    print('⚠ Drift detected — these decisions may not be reflected in your code:')
-    for d in result['drifted']:
-        print(f'  {d[\"file_path\"]} ← decision {d[\"latest_decision\"][\"hex_id\"]}: {d[\"latest_decision\"][\"question_text\"]}')
-"
-```
+### Cadence A — Pre-task drift check (Step 0b)
 
-If drift is found, Claude surfaces the linked decisions as constraints **before** asking the
-developer to confirm the task — not after the code is already written.
+Runs **between Step 0 and Step 1** — before the task is even described.
 
-### Cadence B — Post-decision propagation pass
+1. Fetches all tracked artifacts for the repo (`GET /api/repos/:id/artifacts`)
+2. Gets last git commit timestamp for each via `git log`
+3. Calls `POST /api/artifacts/drift` with the timestamp map
+4. If any files are drifted, surfaces the linked decisions as hard constraints and asks:
+   *"Before we start — these decisions may not be reflected in the code yet. Address drift first?"*
 
-Runs **after Step 3** (after answers are captured):
+Developer answers yes → Claude factors in the constraints before the task.
+Developer answers no → proceeds, drift recorded, pre-commit hook is the backstop.
 
-```
-After each WAL entry is written, check if any tracked artifacts are linked to the
-settled topic. Surface files that may need updating to reflect the new decision:
+### Cadence B — Post-decision propagation pass (Step 3c)
 
-"Decision a3f2e71 was just settled. The following tracked files may need updating:
-  - packages/backend/prisma/schema.prisma (linked to this decision)
-  - packages/backend/src/routes/decisions.ts (linked to this decision)
-Should I update them, or will you handle it manually?"
-```
+Runs **after Step 3** for each recorded decision.
 
-This mirrors Stoa's cadence #2 (post-decision propagation pass) but automated via the pipeline.
+1. Calls `GET /api/decisions/:id/linked-artifacts`
+2. If tracked files are linked, surfaces them and asks:
+   *"Decision `a3f2e71` is linked to these files — should I update them now?"*
+3. If developer confirms, Claude makes the code changes immediately in the same session
+4. The pre-commit hook verifies drift is cleared when they commit
 
-### Agent file version bump
+This closes the decision→code loop in the same session rather than leaving it to chance.
 
-These cadences are added to `.claude/reasoning-layer.md` as a v1.3.0 update. The VS Code
-extension writes the new version on next activation.
+### Drift window — before and after
+
+| | When drift is caught |
+|---|---|
+| Phase 3 only | At `git commit` (hours or days later) |
+| Phase 4 Cadence A added | At session start (before the task) |
+| Phase 4 Cadence B added | Immediately after the decision, same session |
 
 ---
 
-## Phase 5 — Context Log Export
+## Phase 5 — Context Log Export ✅ Shipped
 
 **Goal:** Generate Stoa-compatible markdown from Postgres on demand. The database is the
 source of truth; the markdown is a derived view.
@@ -347,6 +425,18 @@ Accepts query params:
 - `?type=<entry_type>` — filter by type
 - `?format=stoa` (default) or `?format=adr`
 
+### What shipped
+
+| Change | Detail |
+|---|---|
+| `GET /api/repos/:id/context-log` | Full WAL as Stoa-formatted markdown; also supports `?format=adr` for ADR table layout |
+| `?since=<iso>` filter | Returns only entries after the given timestamp — useful for incremental export |
+| `?type=<entry_type>` filter | Filter by entry type (decision, rollback, wont_do, table, observation) |
+| Superseded warnings inline | Rolled-back decisions show ⚠ Superseded by `<hexId>` so readers can't miss them |
+| `Content-Disposition: attachment` | Browser download works out of the box — `context_log.md` |
+| Stoa + ADR dual format | `formatStoa()` renders narrative prose; `formatAdr()` renders decision tables with metadata |
+| Agent file Step 0c | On-demand context log fetch added to `.claude/reasoning-layer.md` v1.6.0 |
+
 ### New VS Code command: `Reasoning Layer: Export Context Log`
 
 Calls `GET /api/repos/:id/context-log` and writes the result to `context_log.md` in the
@@ -363,10 +453,10 @@ and is gitignore-able if the team prefers database-only storage.
 | Phase | Status | Key outcome |
 |---|---|---|
 | **1 — WAL Upgrade** | ✅ Shipped | `reasoningArc` + `sessionId` on Decision; rollback validation on all write paths |
-| **2 — Refining Session** | Planned | Multi-turn dialogue before settlement; Slack thread = session |
-| **3 — Artifact Coherence** | Planned | Track files → link to decisions → drift detection → pre-commit hook |
-| **4 — Agent File Cadences** | Planned | Pre-task drift check + post-decision propagation pass in agent file |
-| **5 — Context Log Export** | Planned | Stoa-compatible markdown WAL generated from Postgres on demand |
+| **2 — Async Refining Session** | ✅ Shipped | Fire-and-forget routing; interim table WAL entry; catch-up cadence; reviewer settles with `/settle` |
+| **3 — Artifact Coherence** | ✅ Shipped | Track files → link to decisions → drift detection → pre-commit hook → superseded decision warnings |
+| **4 — Agent File Cadences** | ✅ Shipped | Step 0b: pre-task drift check; Step 3c: post-decision propagation pass; drift window shrinks from days → seconds |
+| **5 — Context Log Export** | ✅ Shipped | `GET /repos/:id/context-log` renders full WAL as Stoa/ADR markdown on demand from Postgres |
 
 ### Implementation order
 

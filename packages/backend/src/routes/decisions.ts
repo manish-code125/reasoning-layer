@@ -373,6 +373,40 @@ export const decisionRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
+  // Return tracked artifacts linked to a specific decision — used by the
+  // post-decision propagation pass (Cadence B) to surface files that may need updating.
+  app.get<{ Params: { id: string } }>("/decisions/:id/linked-artifacts", async (req, reply) => {
+    const decision = await prisma.decision.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        hexId: true,
+        questionText: true,
+        answer: true,
+        entryType: true,
+        artifactLinks: {
+          include: {
+            artifact: { select: { id: true, filePath: true, description: true } },
+          },
+        },
+      },
+    });
+    if (!decision) return reply.notFound("Decision not found");
+
+    return {
+      decision_id: decision.id,
+      hex_id: decision.hexId,
+      entry_type: decision.entryType,
+      question_text: decision.questionText,
+      answer: decision.answer,
+      artifacts: decision.artifactLinks.map((l) => ({
+        artifact_id: l.artifact.id,
+        file_path: l.artifact.filePath,
+        description: l.artifact.description ?? null,
+      })),
+    };
+  });
+
   // Link a decision to one or more tracked artifact file paths.
   // Creates TrackedArtifact rows if they don't exist yet (auto-track on link).
   app.post<{ Params: { id: string } }>("/decisions/:id/link-artifacts", async (req, reply) => {

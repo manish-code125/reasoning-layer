@@ -67,34 +67,36 @@ model Prompt {
   analysis       Json?
   // Enriched prompt string with injected decision context — populated by Phase 5
   enrichedPrompt String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-  questions      Question[]
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  questions          Question[]
+  refiningSessions   RefiningSession[]
 
   @@map("prompts")
 }
 
 // A clarification question generated from a prompt
 model Question {
-  id                 String    @id @default(uuid())
+  id                 String           @id @default(uuid())
   promptId           String
-  prompt             Prompt    @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  prompt             Prompt           @relation(fields: [promptId], references: [id], onDelete: Cascade)
   text               String
   // architectural | product | infra | compliance | ux
   category           String?
   // low | medium | high | critical — drives escalation threshold in Phase 3
-  riskLevel          String    @default("medium")
+  riskLevel          String           @default("medium")
   // unanswered | answered_locally | routed | resolved
-  status             String    @default("unanswered")
+  status             String           @default("unanswered")
   localAnswer        String?
-  slackRouted        Boolean   @default(false)
+  slackRouted        Boolean          @default(false)
   slackMessageTs     String?
   slackChannel       String?
   // LLM hint at what Stoa entry type this question will likely produce
   suggestedEntryType String?
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
   decision           Decision?
+  refiningSession    RefiningSession?
 
   @@map("questions")
 }
@@ -131,12 +133,51 @@ model Decision {
   repo                   Repo?      @relation(fields: [repoId], references: [id])
   artifactLinks          ArtifactDecisionLink[]
   // Captures the dialogue/context arc that led to this entry — richer than just Q+A
-  reasoningArc           String?
+  reasoningArc           String?          @map("reasoning_arc")
   // FK to RefiningSession — populated in Phase 2 when a session is used before settling
-  sessionId              String?
+  sessionId              String?          @map("session_id")
+  session                RefiningSession? @relation(fields: [sessionId], references: [id])
   // 1536-dim embedding for pgvector similarity search — populated in Phase 4
   embedding              Unsupported("vector(1536)")?
   createdAt              DateTime   @default(now())
 
   @@map("decisions")
+}
+
+// An async multi-turn dialogue for a routed question. The session stays open until
+// the reviewer explicitly settles (/settle, /table, /wont-do) — the developer is
+// never blocked; they proceed with an interim table WAL entry while the session is open.
+model RefiningSession {
+  id                String           @id @default(uuid())
+  promptId          String
+  prompt            Prompt           @relation(fields: [promptId], references: [id])
+  questionId        String?          @unique
+  question          Question?        @relation(fields: [questionId], references: [id])
+  topic             String
+  // open | settled | tabled | abandoned
+  status            String           @default("open")
+  // decision | wont_do | table | branch | rollback | observation
+  outcome           String?
+  // ID of the interim table WAL entry written when question was routed — superseded on settlement
+  interimDecisionId String?
+  createdAt         DateTime         @default(now())
+  settledAt         DateTime?
+  messages          SessionMessage[]
+  decisions         Decision[]
+
+  @@map("refining_sessions")
+}
+
+// A single turn in a RefiningSession dialogue — developer, reviewer, or AI.
+model SessionMessage {
+  id        String          @id @default(uuid())
+  sessionId String
+  session   RefiningSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // developer | reviewer | ai
+  role      String
+  content   String
+  slackTs   String?
+  createdAt DateTime        @default(now())
+
+  @@map("session_messages")
 }
