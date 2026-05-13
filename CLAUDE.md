@@ -101,20 +101,20 @@ Decisions and prompts are scoped to a `Repo` record (table: `repos`, field: `pat
 
 ---
 
-## WAL discipline (Phase 1 — Stoa integration)
+## WAL discipline (Phases 1–5 — fully shipped)
 
-Decisions are proper **append-only WAL entries**. The `Decision` model has been upgraded:
+Decisions are proper **append-only WAL entries**. All five Stoa integration phases are live:
 
-- `reasoningArc String?` — the dialogue context that led to this entry. Richer than just Q+A; captures the reasoning arc from a refining session. Populated by Phase 2 sessions; `null` for fast-path Q→A answers.
-- `sessionId String?` — FK placeholder for the `RefiningSession` model (Phase 2). Already present in the schema so Phase 2 can backfill without a schema migration.
-- `rollback` entries are validated across **all write paths** (REST routes + Slack modal): `supersedes_id` must reference a valid existing decision. Previously the Slack modal did not validate this.
-- `reasoning_arc` is included in all API responses, `GET /decisions/export`, and `GET /decisions/export-since` markdown output.
+- `reasoningArc String?` — the dialogue context that led to this entry. Assembled from `SessionMessage` records when a `RefiningSession` settles; `null` for fast-path Q→A answers.
+- `sessionId String?` — FK to `RefiningSession`. Populated when a question is routed to Slack.
+- `rollback` entries are validated across **all write paths** (REST routes + Slack modal): `supersedes_id` must reference a valid existing decision.
+- `reasoning_arc` is included in all API responses, `GET /decisions/export`, `GET /decisions/export-since`, and `GET /repos/:id/context-log` markdown output.
 
-**Planned phases:**
-- **Phase 2 — Refining Session:** `RefiningSession` + `SessionMessage` models; multi-turn Slack dialogue before settling; `POST /sessions` lifecycle endpoints
-- **Phase 3 — Artifact Coherence:** `TrackedArtifact` + `ArtifactDecisionLink`; drift detection; pre-commit hook
-- **Phase 4 — Agent File Cadences:** pre-task drift check + post-decision propagation pass in `.claude/reasoning-layer.md`
-- **Phase 5 — Context Log Export:** `GET /repos/:id/context-log` renders full WAL as Stoa-compatible markdown from Postgres
+**Shipped phases:**
+- **Phase 2 — Async Refining Session:** `RefiningSession` + `SessionMessage` models; fire-and-forget routing; interim `table` WAL entry written immediately; catch-up cadence at session start; `/settle`, `/wont-do`, `/table` reply prefixes in Slack thread
+- **Phase 3 — Artifact Coherence:** `TrackedArtifact` + `ArtifactDecisionLink`; `POST /artifacts/drift`; pre-commit hook (`scripts/pre-commit`); superseded decision warnings in enriched prompts
+- **Phase 4 — Agent File Cadences:** Step 0b pre-task drift check (Cadence A); Step 3c post-decision propagation pass (Cadence B); both in `.claude/reasoning-layer.md` v1.6.0
+- **Phase 5 — Context Log Export:** `GET /repos/:id/context-log` renders full WAL as Stoa or ADR markdown from Postgres; filters: `?since`, `?type`, `?format`
 
 ---
 
@@ -149,9 +149,10 @@ Questions are grouped into a **session thread** per routing batch:
 - Reviewers reply in the thread (plain text) **or** click `✏️ Answer with rationale` for the modal (entry type, rationale, alternatives, reopen condition).
 
 When an answer lands:
-1. Backend saves it to Postgres with `repoId` FK and embeds it for semantic search
-2. The question message updates to ✅ answered state
-3. A Slack DM is sent to the developer: *"Resume your Claude session with: 'the Slack answers are in — continue with the task'"*
+1. Backend saves the final WAL entry to Postgres, superseding the interim `table` entry; embeds it for semantic search
+2. The question message in Slack updates to ✅ answered state
+3. A FYI DM is sent to the developer: *"Your next session will pick this up automatically via the catch-up cadence."*
+4. At the next session start, Step 0 surfaces the settled decision as a constraint before any new task is described
 
 ---
 

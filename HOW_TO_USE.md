@@ -42,14 +42,14 @@ pnpm dev
 Verify:
 ```bash
 curl http://localhost:3002/health
-# {"status":"ok"}
+# {"status":"ok","phase":5,...}
 ```
 
 ---
 
 ## 2. Slack configuration (optional but recommended)
 
-High-risk questions are routed to Slack as structured threads. Without Slack configured, questions are answered inline only.
+High-risk questions are routed to Slack as structured threads. Without Slack configured, all questions are answered inline only.
 
 **Create a Slack app:**
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From Manifest
@@ -65,7 +65,7 @@ SLACK_APP_TOKEN=xapp-...
 SLACK_ESCALATION_CHANNEL=C...       # channel ID (not name)
 DEFAULT_ARCH_SLACK_ID=U...          # fallback reviewer for architecture questions
 DEFAULT_PM_SLACK_ID=U...            # fallback reviewer for product questions
-DEVELOPER_SLACK_ID=U...             # your Slack ID — receives DMs when answers land
+DEVELOPER_SLACK_ID=U...             # your Slack ID — receives FYI DMs when answers land
 ```
 
 ---
@@ -87,13 +87,19 @@ Install in VS Code: **Extensions → ⋯ (More Actions) → Install from VSIX**
 ```json
 {
   "reasoning-layer.backendUrl": "http://44.200.186.86/reasoning",
-  "reasoning-layer.developerSlackId": "U0B2TFPCRBN"
+  "reasoning-layer.developerSlackId": "U0B2TFPCRBN",
+  "reasoning-layer.hookMode": "warn"
 }
 ```
+
+`hookMode` controls the coherence pre-commit hook: `"warn"` (default) prints drift warnings but lets the commit through; `"block"` prevents commits when tracked files have unimplemented decisions.
 
 On activation (opening any git repo), the extension automatically:
 - Creates `.claude/reasoning-layer.md` — the agent file that instructs Claude Code to run the pipeline
 - Prepends `@.claude/reasoning-layer.md` to `CLAUDE.md` (creates it if missing)
+- Installs the coherence pre-commit hook at `.githooks/pre-commit` and runs `git config core.hooksPath .githooks` — a one-time status bar toast confirms `⚡ Reasoning Layer: coherence hook installed`
+
+No manual shell commands needed.
 
 ---
 
@@ -103,15 +109,18 @@ On activation (opening any git repo), the extension automatically:
 2. The extension activates on any git repo (`workspaceContains:.git`)
 3. Open Claude Code (`Cmd+Shift+P → Claude Code`) and start a task as normal
 
-Claude Code will automatically run the 4-step pipeline for any non-trivial task:
+Claude Code runs the full pipeline automatically for any non-trivial task:
 
 ```
-Step 1 — Submit the task to the backend
-Step 2 — Analyze (LLM classifies risk + generates questions)
-Step 2b — Auto-route high-risk questions to Slack (if should_escalate)
-Step 3 — Capture developer answers for remaining questions
-Step 4 — Fetch enriched context (past decisions injected as constraints)
-         → Claude proceeds with the task
+Step 0  — Catch-up cadence: surface decisions that landed since last session + any in-flight questions
+Step 0b — Pre-task drift check: surface tracked files with decisions not yet reflected in code
+Step 1  — Submit the task to the backend
+Step 2  — Analyze: LLM classifies risk + generates questions
+Step 2b — Auto-route high-risk questions to Slack (if should_escalate) — developer does NOT wait
+Step 3  — Capture developer answers for remaining questions
+Step 3b — Suggest artifact links for each new decision
+Step 3c — Post-decision propagation: surface tracked files linked to the new decision
+Step 4  — Fetch enriched context (past decisions injected as constraints) → Claude proceeds
 ```
 
 You don't need to press any keyboard shortcuts. The pipeline runs inline in your Claude Code conversation.
@@ -120,33 +129,91 @@ You don't need to press any keyboard shortcuts. The pipeline runs inline in your
 
 ## 5. Day-to-day workflow
 
+### Session start — catch-up cadence
+
+At the start of every session, Claude automatically checks for:
+- **Settled decisions** — answers that arrived from Slack reviewers since your last session. These are surfaced as constraints before you describe your task.
+- **In-flight questions** — questions still open with reviewers. Claude surfaces the working assumption for each so you know what you're operating under.
+
 ### Answering questions inline
 
-For low-risk questions, Claude asks you directly in the conversation. Just reply and Claude captures the answer before proceeding.
+For low-risk questions, Claude asks you directly in the conversation. Just reply and Claude captures the answer as a WAL entry before proceeding.
 
-### Answering via Slack
+### Answering via Slack (async — no blocking)
 
-High-risk questions (`high` or `critical` risk level with `should_escalate: true`) are posted to your Slack escalation channel as a thread:
+High-risk questions (`high` or `critical` with `should_escalate: true`) are fire-and-forget:
+
+1. Claude routes the question to your Slack escalation channel as a thread and **immediately writes an interim `table` WAL entry** with a working assumption.
+2. **You do not wait.** Claude proceeds with the working assumption.
+3. Your reviewer answers in Slack at their own pace — plain-text thread reply, or clicking ✏️ Answer with rationale for the full modal.
+4. When the answer lands, you receive a brief FYI DM: *"Your next session will pick this up automatically via the catch-up cadence."*
+5. Next time you open Claude Code, the settled decision is surfaced at Step 0 before any new task.
+
+**Reviewer answer prefixes in Slack thread:**
+- `/settle <answer>` — settles as `decision`; closes the session; supersedes the interim entry
+- `/wont-do <reason>` — settles as `wont_do`
+- `/table` — enriches the interim entry with rationale and closes as tabled
+- Plain reply — added as a session message; the session stays open for further discussion
+
+### Pre-task drift check
+
+Before every task, Claude checks whether any tracked files have decisions that haven't been implemented yet. If drift is found:
 
 ```
-🔴 3 decisions needed from @reviewer
-  Q1 of 3 · architecture   [❓ question text]   [✏️ Answer with rationale]
-  Q2 of 3 · security       [❓ question text]   [✏️ Answer with rationale]
-  Q3 of 3 · data           [❓ question text]   [✏️ Answer with rationale]
+⚠ Drift detected — 1 tracked file has decisions not yet reflected in code:
+
+  packages/backend/src/routes/auth.ts
+    [a3f2e71] Should session tokens use short TTL?
+    → Yes — 15-minute access token, 7-day refresh
+    decision: 2026-05-10  |  file last committed: 2026-05-08
 ```
 
-Two ways to answer:
-- **Reply in the thread** — plain text reply to a question message; captured immediately
-- **Click ✏️ Answer with rationale** — opens a modal with fields for entry type, answer, rationale, alternatives considered, and reopen conditions
+Claude will ask: *"Before we start — should we address the drift first?"*
 
-When all answers land, you'll receive a Slack DM:
-> *"✅ Decision captured — @reviewer answered in Slack. Resume your Claude session with: 'the Slack answers are in — continue with the task'"*
+### Post-decision propagation
 
-Go back to Claude Code and say: `"the Slack answers are in — continue with the task"`
+After each decision is recorded, Claude checks which tracked files are linked to it and asks if you want to update them immediately. If you confirm, Claude makes the code changes and the pre-commit hook verifies drift is cleared on commit.
+
+### Coherence pre-commit hook
+
+Installed automatically by the VS Code extension. On every `git commit`, it checks staged files against the drift endpoint:
+
+- **Warn mode** (default): prints a warning if drift is detected, but lets the commit through
+- **Block mode** (`REASONING_LAYER_MODE=block`): exits 1 and prevents the commit until drift is resolved
+
+### Viewing the full context log
+
+Ask Claude: *"Show me the full decision history for this repo."*
+
+Claude fetches and prints the WAL as Stoa-formatted markdown — append-only, newest entries last, with superseded decisions clearly flagged:
+
+```markdown
+## `a3f2e71` — decision — 2026-05-09
+
+**Question:** Should we use Redis or Postgres for session storage?
+
+**Decision:** Redis — Postgres adds too much latency on the auth path
+
+**Rationale:** p99 auth SLA is 50ms; Postgres at our write volume adds ~30ms
+
+---
+```
+
+You can also fetch it directly:
+```bash
+# Stoa format (default)
+curl "http://44.200.186.86/reasoning/api/repos/<repo-id>/context-log"
+
+# ADR table format
+curl "http://44.200.186.86/reasoning/api/repos/<repo-id>/context-log?format=adr"
+
+# Filter by date or type
+curl "http://44.200.186.86/reasoning/api/repos/<repo-id>/context-log?since=2026-05-01&type=decision"
+```
 
 ### Syncing the decision log
 
-After answers land, sync them to your project's `decision.log.md`:
+After decisions land, sync them to your project's `decision.log.md`:
 
 - VS Code: `Reasoning Layer: Sync Decision Log` command
 - Or use the Claude Code slash command: `/decide-log`
@@ -155,7 +222,31 @@ This appends all new decisions (since the last sync) to `decision.log.md` and co
 
 ---
 
-## 6. Seeding historical decisions
+## 6. Tracking files (artifact coherence)
+
+To get drift detection and post-decision propagation for specific files, register them as tracked artifacts:
+
+```bash
+BACKEND="http://44.200.186.86/reasoning"
+REPO="/path/to/your/project"
+
+curl -s -X POST "$BACKEND/api/repos/$REPO/artifacts" \
+  -H "Content-Type: application/json" \
+  -d '{"file_path": "packages/backend/src/routes/auth.ts", "description": "auth API routes"}'
+```
+
+Once a file is tracked, decisions can be linked to it. When the file's last git commit is older than the linked decision, drift is detected.
+
+To link a decision to tracked files:
+```bash
+curl -s -X POST "$BACKEND/api/decisions/<decision-id>/link-artifacts" \
+  -H "Content-Type: application/json" \
+  -d '{"file_paths": ["packages/backend/src/routes/auth.ts"]}'
+```
+
+---
+
+## 7. Seeding historical decisions
 
 If your project has existing architectural decisions you want the system to know about, seed them directly:
 
@@ -176,7 +267,7 @@ These decisions are immediately embedded and will surface in future prompt enric
 
 ---
 
-## 7. Searching the decision store
+## 8. Searching the decision store
 
 ```bash
 # Semantic search
@@ -193,21 +284,27 @@ curl http://localhost:3002/api/decisions/export > DECISIONS.md
 
 # Export since a date (used by decision log sync)
 curl "http://localhost:3002/api/decisions/export-since?repo=/your/project&since=2026-01-01T00:00:00Z"
+
+# Full context log as Stoa markdown
+curl "http://localhost:3002/api/repos/<repo-id-or-path>/context-log" > context_log.md
 ```
 
 ---
 
-## 8. EC2 deployment
+## 9. EC2 deployment
 
 The backend and UI are deployed on EC2 at `44.200.186.86`.
 
 ```bash
 KEY="/Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem"
 
-# Deploy backend (tsx watch auto-reloads on file change — no restart needed)
+# Deploy backend (tsx watch auto-reloads on file change — no restart needed for src/ changes)
 rsync -az packages/backend/src/ \
   -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
   ubuntu@44.200.186.86:~/reasoning-layer/packages/backend/src/
+
+# If you added new route files, restart pm2 (tsx watch may miss new files)
+ssh -i $KEY ubuntu@44.200.186.86 "pm2 restart reasoning-layer"
 
 # Deploy prisma schema + run migrations
 rsync -az packages/backend/prisma/ \
@@ -237,7 +334,7 @@ ssh -i $KEY ubuntu@44.200.186.86 "pm2 restart reasoning-layer-ui"
 
 ---
 
-## 9. Skipping the pipeline
+## 10. Skipping the pipeline
 
 Prefix any Claude task with `[skip-rl]` to bypass the pipeline entirely:
 
@@ -249,7 +346,7 @@ The pipeline also auto-skips for typo/comment/formatting edits and follow-up tur
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 **Pipeline returns 500 error**
 - Check backend is running: `curl http://44.200.186.86/reasoning/health`
@@ -265,6 +362,10 @@ The pipeline also auto-skips for typo/comment/formatting edits and follow-up tur
 - The Bolt socket listener logs every thread event: look for `[bolt] thread reply:` in pm2 logs
 - If missing, Socket Mode may have disconnected — `pm2 restart reasoning-layer`
 
+**Drift check skipped / backend unreachable**
+- The pre-task drift check and pre-commit hook both gracefully skip if the backend is unreachable
+- Verify the backend URL in extension settings: `reasoning-layer.backendUrl`
+
 **VS Code extension using wrong backend URL**
 - Open Settings → search `reasoning-layer.backendUrl`
 - Ensure it's `http://44.200.186.86/reasoning` (not `localhost:3002`)
@@ -272,3 +373,8 @@ The pipeline also auto-skips for typo/comment/formatting edits and follow-up tur
 **`CLAUDE.md` not being created in a new project**
 - The extension activates on `workspaceContains:.git` — make sure the folder has a `.git` directory
 - Run `Reasoning Layer: Install Agent File` manually from the command palette
+
+**Pre-commit hook not running**
+- Verify `.githooks/pre-commit` exists and is executable (`chmod +x .githooks/pre-commit`)
+- Verify `git config core.hooksPath` returns `.githooks`
+- Re-open the workspace — the extension will reinstall the hook on activation if missing
