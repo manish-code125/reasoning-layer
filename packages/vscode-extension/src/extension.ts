@@ -530,10 +530,7 @@ async function checkDrift(): Promise<void> {
   }
 }
 
-async function generateCoherenceHook(): Promise<void> {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!root) return;
-
+async function writeCoherenceHook(root: string): Promise<void> {
   const hookMode = vscode.workspace.getConfiguration("reasoning-layer").get<string>("hookMode") ?? "warn";
   const backendUrl =
     vscode.workspace.getConfiguration("reasoning-layer").get<string>("backendUrl") ??
@@ -610,6 +607,74 @@ sys.exit(1)`
   : `print("Continuing commit (hookMode=warn). Run 'Reasoning Layer: Check Drift' in VS Code to review.")
 sys.exit(0)`}
 PYEOF
+
+# WAL conflict check — runs only when context_log.md is staged
+python3 << 'WALEOF'
+import json, subprocess, urllib.request, sys, os, re
+
+BACKEND = os.environ.get("REASONING_LAYER_BACKEND", "${backendUrl}")
+HOOK_MODE = "${hookMode}"
+
+staged = subprocess.check_output(
+    ["git", "diff", "--cached", "--name-only"]
+).decode().strip().split("\\n")
+
+if "context_log.md" not in staged:
+    sys.exit(0)
+
+diff_text = subprocess.check_output(
+    ["git", "diff", "--cached", "--", "context_log.md"]
+).decode()
+
+new_hex_ids = re.findall(r'^\\+## \`([a-f0-9]{7,})\`', diff_text, re.MULTILINE)
+if not new_hex_ids:
+    sys.exit(0)
+
+conflicts_found = []
+for hex_id in new_hex_ids:
+    try:
+        url = f"{BACKEND}/api/decisions/{hex_id}/conflicts"
+        result = json.loads(urllib.request.urlopen(url, timeout=8).read())
+        for c in result.get("conflicts", []):
+            conflicts_found.append({"new_hex": hex_id, "prior": c})
+    except Exception:
+        pass
+
+if not conflicts_found:
+    sys.exit(0)
+
+SEP = "=" * 72
+print(f"\\n[Reasoning Layer] WAL Conflict Detected")
+print(SEP)
+
+for item in conflicts_found:
+    p = item["prior"]
+    captured = p.get("created_at", "")[:10]
+    print(f"  Your new entry:   [{item['new_hex']}]")
+    print(f"  Conflicts with:   [{p['hex_id']}]  (captured {captured})")
+    print(f"  Their question:   {p['question_text']}")
+    print(f"  Their decision:   {p['answer']}")
+    if p.get("rationale"):
+        print(f"  Their rationale:  {p['rationale']}")
+    print(f"  Why it conflicts: {p['reason']}")
+    print()
+
+first_new = conflicts_found[0]["new_hex"]
+print(SEP)
+print(f"  Decision was captured first — it stands in the WAL.")
+print(f"  The WAL is append-only. [{first_new}] stays in the log.")
+print(f"  To make [{first_new}] the active decision:")
+print("    * Open VS Code -> 'Reasoning Layer: Capture Decision'")
+print("    * Set type = decision, supersedes_id = <their hex_id>, add your rationale.")
+print("    * This appends an override entry — full trace preserved.\\n")
+
+if HOOK_MODE == "block":
+    print("  Commit blocked (hookMode=block). Add an override entry first, then retry.\\n")
+    sys.exit(1)
+else:
+    print("  Proceeding (hookMode=warn). Resolve the conflict when ready.\\n")
+    sys.exit(0)
+WALEOF
 `;
 
   fs.mkdirSync(hookDir, { recursive: true });
@@ -623,9 +688,160 @@ PYEOF
     return;
   }
 
+}
+
+async function generateCoherenceHook(): Promise<void> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) return;
+
+  const hookMode = vscode.workspace.getConfiguration("reasoning-layer").get<string>("hookMode") ?? "warn";
+  await writeCoherenceHook(root);
   vscode.window.showInformationMessage(
     `Coherence hook written to .githooks/pre-commit (mode: ${hookMode}). It will check artifact drift on every commit.`
   );
+}
+
+async function captureDecision(): Promise<void> {
+  const repo = repoPath();
+  if (!repo) {
+    vscode.window.showErrorMessage("Reasoning Layer: No workspace folder open.");
+    return;
+  }
+
+  const questionText = await vscode.window.showInputBox({
+    prompt: "What decision was made? (one sentence — the question being settled)",
+    placeHolder: "Which database should we use for session storage?",
+    ignoreFocusOut: true,
+  });
+  if (!questionText?.trim()) return;
+
+  const answer = await vscode.window.showInputBox({
+    prompt: "What was decided?",
+    placeHolder: "Use Redis — lower latency than Postgres for ephemeral session data",
+    ignoreFocusOut: true,
+  });
+  if (!answer?.trim()) return;
+
+  const entryTypePick = await vscode.window.showQuickPick(
+    [
+      { label: "decision", description: "Settled positive answer (default)" },
+      { label: "wont_do", description: "Explicit rejection (not doing this)" },
+      { label: "table", description: "Deferred — revisit later" },
+      { label: "observation", description: "Constraint note, no action needed" },
+    ],
+    { title: "Entry type", placeHolder: "Select entry type" }
+  );
+  if (!entryTypePick) return;
+
+  const rationale = await vscode.window.showInputBox({
+    prompt: "Rationale? (optional — press Enter to skip)",
+    ignoreFocusOut: true,
+  });
+
+  let hexId = "";
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: "Reasoning Layer", cancellable: false },
+      async (p) => {
+        p.report({ message: "Capturing decision..." });
+        const resp = await apiPost<{
+          hex_id: string;
+          entry_type: string;
+          question_text: string;
+          answer: string;
+          rationale: string | null;
+        }>("/api/decisions", {
+          question_text: questionText.trim(),
+          answer: answer.trim(),
+          entry_type: entryTypePick.label,
+          rationale: rationale?.trim() || undefined,
+          linked_repo: repo,
+        });
+
+        hexId = resp.hex_id;
+        const dateStr = new Date().toISOString().slice(0, 10);
+        const rationaleLine = resp.rationale ? `\n**Rationale:** ${resp.rationale}` : "";
+        const entry =
+          `\n## \`${hexId}\` — ${resp.entry_type} — ${dateStr}\n\n` +
+          `**Question:** ${resp.question_text}\n\n` +
+          `**Decision:** ${resp.answer}${rationaleLine}\n\n---\n`;
+
+        const ctxPath = path.join(repo, "context_log.md");
+        if (!fs.existsSync(ctxPath)) {
+          fs.writeFileSync(
+            ctxPath,
+            `# Context Log\n\n> Append-only WAL. Managed by Reasoning Layer.\n\n---\n${entry}`,
+            "utf8"
+          );
+        } else {
+          fs.appendFileSync(ctxPath, entry, "utf8");
+        }
+      }
+    );
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Reasoning Layer: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
+
+  vscode.window.showInformationMessage(
+    `Reasoning Layer: Captured [${hexId}] to decision memory and context_log.md.`
+  );
+
+  // Best-effort conflict check — never throw, never block
+  try {
+    const conflictResult = await apiGet<{
+      conflicts: Array<{
+        decision_id: string;
+        hex_id: string;
+        question_text: string;
+        answer: string;
+        rationale: string | null;
+        reason: string;
+      }>;
+      mode: string;
+    }>(`/api/decisions/${hexId}/conflicts`);
+
+    const cfls = conflictResult.conflicts;
+    if (cfls.length > 0) {
+      const c = cfls[0];
+      const more = cfls.length > 1 ? ` (+${cfls.length - 1} more)` : "";
+      const rationaleNote = c.rationale ? ` Their rationale: ${c.rationale}` : "";
+      const choice = await vscode.window.showWarningMessage(
+        `Reasoning Layer: Conflict with [${c.hex_id}] — ${c.reason}${more}.${rationaleNote}`,
+        "Override (D1 stays)",
+        "Route to Slack",
+        "Acknowledge"
+      );
+
+      if (choice === "Override (D1 stays)") {
+        const overrideRationale = await vscode.window.showInputBox({
+          prompt: `Why does your decision [${hexId}] override [${c.hex_id}]?`,
+          placeHolder: "e.g. New benchmarks showed Postgres handles our session volume; Redis ops cost too high",
+          ignoreFocusOut: true,
+        });
+        await apiPost("/api/decisions", {
+          question_text: c.question_text,
+          answer: answer?.trim() ?? "",
+          entry_type: "decision",
+          rationale: overrideRationale?.trim() || `Overrides [${c.hex_id}] — see WAL trace for prior reasoning`,
+          supersedes_id: c.decision_id,
+          linked_repo: repo,
+        });
+        vscode.window.showInformationMessage(
+          `Reasoning Layer: Override recorded. [${c.hex_id}] stays in the log — full trace preserved.`
+        );
+      } else if (choice === "Route to Slack") {
+        vscode.window.showInformationMessage(
+          `Reasoning Layer: Use "Generate Questions for Task" to route this conflict to a Slack reviewer.`
+        );
+      }
+      // "Acknowledge" → developer is aware, no WAL action needed
+    }
+  } catch {
+    // conflict check is best-effort — silently ignore errors
+  }
 }
 
 // ─── Ambient agent file install ───────────────────────────────────────────────
@@ -726,7 +942,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("reasoning-layer.initArtifacts", initArtifacts),
     vscode.commands.registerCommand("reasoning-layer.trackCurrentFile", trackCurrentFile),
     vscode.commands.registerCommand("reasoning-layer.checkDrift", checkDrift),
-    vscode.commands.registerCommand("reasoning-layer.generateCoherenceHook", generateCoherenceHook)
+    vscode.commands.registerCommand("reasoning-layer.generateCoherenceHook", generateCoherenceHook),
+    vscode.commands.registerCommand("reasoning-layer.captureDecision", captureDecision)
   );
 }
 
@@ -737,6 +954,24 @@ async function initializeRepo(context: vscode.ExtensionContext): Promise<void> {
     await context.workspaceState.update(DECLINED_KEY, false);
 
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    // Create context_log.md if it doesn't exist
+    if (root) {
+      const ctxPath = path.join(root, "context_log.md");
+      if (!fs.existsSync(ctxPath)) {
+        fs.writeFileSync(
+          ctxPath,
+          "# Context Log\n\n> Append-only WAL. Managed by Reasoning Layer.\n\n---\n\n",
+          "utf8"
+        );
+      }
+    }
+
+    // Silently install the pre-commit coherence hook
+    if (root) {
+      await writeCoherenceHook(root).catch(() => {});
+    }
+
     const claudeMdPath = root ? path.join(root, "CLAUDE.md") : null;
     const hasClaude = claudeMdPath ? fs.existsSync(claudeMdPath) : false;
 
@@ -745,12 +980,12 @@ async function initializeRepo(context: vscode.ExtensionContext): Promise<void> {
       const alreadyImported = existing.includes(CLAUDE_IMPORT_LINE);
       vscode.window.showInformationMessage(
         alreadyImported
-          ? `Reasoning Layer: ambient agent updated for this repo (v${AGENT_FILE_VERSION}).`
-          : `Reasoning Layer: initialized. Claude will intercept tasks in this repo automatically.`
+          ? `Reasoning Layer: initialized — agent file, context_log.md, and pre-commit hook ready (v${AGENT_FILE_VERSION}).`
+          : `Reasoning Layer: initialized — agent file, context_log.md, and pre-commit hook ready. Add \`${CLAUDE_IMPORT_LINE}\` to your CLAUDE.md to activate.`
       );
     } else {
       vscode.window.showInformationMessage(
-        `Reasoning Layer: wrote .claude/reasoning-layer.md. ` +
+        `Reasoning Layer: initialized — agent file, context_log.md, and pre-commit hook ready. ` +
         `Add \`${CLAUDE_IMPORT_LINE}\` to your CLAUDE.md to activate the ambient agent.`
       );
     }

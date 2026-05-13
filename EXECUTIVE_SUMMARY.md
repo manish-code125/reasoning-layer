@@ -8,23 +8,45 @@ A second, subtler problem: even when questions get answered, the reasoning behin
 
 A third problem emerges as the decision store grows: the AI agent has no feedback loop with the code. A decision can be recorded and then quietly ignored — the code drifts from the decision without anyone noticing until it causes an incident.
 
+A fourth problem appears in team settings: two developers working in parallel can capture contradicting decisions independently. Neither is informed of the conflict until it surfaces as a bug or a hard-to-trace regression.
+
 ## What It Does
 
-An ambient layer that sits between the developer and their AI agent. Every time a developer gives Claude a non-trivial task, it automatically:
+An ambient reasoning layer that sits between the developer and their AI agent. It has two modes that complement each other:
 
-1. **Intercepts the task** — submits it to a backend pipeline before Claude starts coding
-2. **Classifies risk** — uses a fast LLM (Haiku) to assess risk level (`low` / `medium` / `high` / `critical`) and domain (architecture, security, product, data)
-3. **Generates clarifying questions** — uses a smarter LLM (Sonnet) to surface ambiguities the developer or AI might have missed
-4. **Routes to the right person** — high-risk questions are fire-and-forget: posted to Slack as a structured thread, tagged to the right reviewer, and an interim working assumption is written immediately so the developer can proceed without blocking
+### Default — Capture mode (Stoa-native)
+
+The agent watches your conversation for **settling cues** — phrases like "let's go with this", "locked", "go ahead", "yes apply". When one fires:
+
+1. It synthesizes the decision that just settled
+2. Proposes a WAL entry inline (question, answer, entry type)
+3. On confirmation, captures it directly to Postgres and appends it to `context_log.md`
+4. Checks for conflicts with existing decisions in the same repo — if found, surfaces them immediately with the prior decision's full context (question, answer, rationale, conflict reason) and offers three resolution paths: override, route to Slack, or acknowledge
+
+No prompt submission. No question generation pipeline. One conversation turn.
+
+### Opt-in — Analyze mode
+
+When the developer explicitly says "analyze this task", "generate questions", or uses a question-generation command:
+
+1. **Submits the task** to the backend pipeline
+2. **Classifies risk** — Haiku assesses risk level and domain
+3. **Generates clarifying questions** — Sonnet surfaces ambiguities the developer or AI might have missed
+4. **Routes high-risk questions to Slack** — fire-and-forget: posted as a structured thread, reviewer tagged, interim working assumption written immediately so the developer can proceed without blocking
 5. **Catches up asynchronously** — at every session start, settled answers from reviewers are surfaced as constraints before the developer describes their task
-6. **Enforces coherence** — tracked files are linked to decisions; a pre-commit hook warns (or blocks) when code is committed to a tracked file that has an unimplemented decision
-7. **Captures answers as reusable memory** — every answer is stored as an append-only WAL entry in Postgres with the full reasoning arc, alternatives considered, and repo scope
-8. **Enriches future prompts** — before Claude answers anything, past decisions for that repo are retrieved via semantic search and prepended as hard constraints
-9. **Exports the full history on demand** — the complete WAL is available as Stoa-compatible markdown via `GET /repos/:id/context-log`, giving teams a human-readable audit trail without maintaining any files manually
+
+### Always-on — Coherence enforcement
+
+Regardless of which mode is active:
+
+- **Pre-task drift check** — before every task, tracked files are compared to decision timestamps; stale constraints are surfaced before any code is written
+- **Pre-commit hook** — when `context_log.md` is staged, the hook checks each new WAL entry against the decision store for conflicts; shows the prior decision's full rationale, explains the append-only invariant, and blocks or warns based on configuration
+- **Artifact coherence** — tracked files are linked to decisions; drift is detected when a file's last commit is older than a linked decision
+- **Prompt enrichment** — past decisions for the repo are retrieved via semantic search and prepended as hard constraints before Claude answers anything
 
 ## The Result
 
-Claude stops re-litigating settled decisions. Reviewers get a clean async Slack thread instead of being pulled into a call. The pre-commit hook closes the loop between the decision store and the code. And the team builds up a searchable institutional memory of *why* things were built the way they were — with the full reasoning arc, not just the conclusion.
+Claude stops re-litigating settled decisions. Developers capture decisions naturally in conversation without switching tools. Reviewers get a clean async Slack thread when escalation is genuinely needed. Conflicting decisions are caught at the moment they're committed — with the full context of why the prior decision was made — not weeks later. And the team builds up a searchable institutional memory of *why* things were built the way they were, with the full reasoning arc intact and append-only.
 
 ---
 
@@ -33,7 +55,7 @@ Claude stops re-litigating settled decisions. Reviewers get a clean async Slack 
 | Layer | Technology |
 |---|---|
 | Backend API | Fastify + Prisma + Postgres + pgvector |
-| AI pipeline | Anthropic Claude — Haiku (classification), Sonnet (questions) |
+| AI pipeline | Anthropic Claude — Haiku (classification, conflict detection), Sonnet (questions) |
 | Notifications | Slack Bolt (Socket Mode) — threads, modals, reply capture |
 | Frontend | Next.js 15 App Router — decision portal |
 | Developer integration | VS Code extension + Claude Code agent file (fully automatic) |
@@ -44,89 +66,121 @@ Claude stops re-litigating settled decisions. Reviewers get a clean async Slack 
 ## Architecture Overview
 
 ```
-Developer types a task in Claude Code
+Developer types in Claude Code
         │
         ▼
 Step 0 — Catch-up cadence
   ├── Surface decisions that landed from Slack since last session
-  └── Surface in-flight questions + working assumptions still pending
+  ├── Surface in-flight questions + working assumptions still pending
+  └── Surface conflict pairs detected among recently settled decisions
 
 Step 0b — Pre-task drift check
   └── Compare tracked file timestamps to decision timestamps
       → If drift found: surface as hard constraints before task is described
 
         │
-        ▼
-Step 1 — Submit task → POST /api/prompts
-
-Step 2 — POST /api/prompts/:id/analyze
-  ├── Haiku: risk level + domain classification
-  └── Sonnet: clarifying questions with should_escalate flag
-
+        ├─── [Settling cue detected — Capture mode, default]
+        │         │
+        │         ▼
+        │    Synthesize WAL entry → confirm with developer
+        │         │
+        │         ▼
+        │    POST /api/decisions (questionId=null — direct capture)
+        │    Append to context_log.md
+        │         │
+        │         ▼
+        │    GET /api/decisions/:id/conflicts
+        │    ├── No conflicts → show [RL] Captured [hex_id]
+        │    └── Conflicts found → show prior decision's Q/A/rationale
+        │                         → Override (D1 stays) / Route to Slack / Acknowledge
         │
-        ├── Low-risk questions → answered inline by developer → WAL entry written
-        │
-        └── High-risk questions → POST /api/questions/:id/route
-                │
-                ├── Interim `table` WAL entry written immediately
-                │   (developer proceeds with working assumption — no blocking)
-                │
-                └── Slack session thread (async)
-                    ┌─────────────────────────────────┐
-                    │ 🔴 3 decisions needed from @arch │  ← top-level message
-                    │   Q1 of 3 · architecture         │  ← thread reply
-                    │   Q2 of 3 · security             │  ← thread reply
-                    │   Q3 of 3 · data                 │  ← thread reply
-                    └─────────────────────────────────┘
-                            │
-                            ▼ reviewer uses /settle, /wont-do, /table
-                            │
-                    Final WAL entry supersedes interim entry
-                    FYI DM sent to developer
-                    → Picked up at next session start via catch-up cadence
+        └─── [Developer explicitly requests questions — Analyze mode, opt-in]
+                  │
+                  ▼
+             Step 1 — Submit task → POST /api/prompts
+             Step 2 — POST /api/prompts/:id/analyze
+               ├── Haiku: risk level + domain classification
+               └── Sonnet: clarifying questions with should_escalate flag
 
-Step 3b — Suggest artifact links for each new decision
-Step 3c — Post-decision propagation: surface linked files for immediate update
-
-Step 4 — GET /api/prompts/:id/enriched
-  └── semantic search surfaces relevant past decisions as hard constraints
-        │
-        ▼
-Claude proceeds with full context
+                  │
+                  ├── Low-risk questions → answered inline → WAL entry written
+                  │
+                  └── High-risk questions → POST /api/questions/:id/route
+                          │
+                          ├── Interim `table` WAL entry written immediately
+                          │   (developer proceeds with working assumption — no blocking)
+                          │
+                          └── Slack session thread (async)
+                              ┌─────────────────────────────────┐
+                              │ 🔴 3 decisions needed from @arch │
+                              │   Q1 of 3 · architecture         │
+                              │   Q2 of 3 · security             │
+                              │   Q3 of 3 · data                 │
+                              └─────────────────────────────────┘
+                                      │
+                                      ▼ reviewer uses /settle, /wont-do, /table
+                                      │
+                              Final WAL entry supersedes interim entry
+                              FYI DM sent to developer
+                              → Picked up at next session start via catch-up cadence
 
 Pre-commit hook (installed automatically by VS Code extension)
-  └── Checks staged files against drift endpoint → warn or block
+  ├── Drift check: staged files → artifact drift endpoint → warn or block
+  └── WAL conflict check: staged context_log.md → new hex IDs → /decisions/:id/conflicts
+        → Shows prior decision Q/A/rationale/capture date
+        → Explains append-only invariant + how to add an override entry
+        → Warns (default) or blocks (hookMode=block)
 ```
 
 ---
 
 ## WAL Entry Types (Stoa-aligned)
 
-Every answer is stored as an append-only WAL entry — never edited, only superseded via `rollback`.
+Every decision is stored as an append-only WAL entry — never edited, never deleted. The full trace of overrides is always recoverable.
 
 | Type | Meaning |
 |---|---|
-| `decision` | Settled positive answer |
+| `decision` | Settled positive answer — including overrides of prior decisions |
 | `wont_do` | Explicit rejection ("not doing in v1") |
-| `table` | Deferred to later phase |
+| `table` | Deferred to a later phase |
 | `branch` | Needs decomposition into sub-decisions |
-| `rollback` | Supersedes a prior decision (must reference original by ID) |
+| `rollback` | Explicit reversal of a prior decision (must reference original by ID) |
 | `observation` | Constraint note — no action needed |
 
-Each entry carries: answer, rationale, alternatives considered, reopen condition, reviewer, linked files, repo, **reasoning arc** (the full dialogue that led to the decision, not just the conclusion), and session ID.
+Each entry carries: answer, rationale, alternatives considered, reopen condition, reviewer, linked files, repo, **reasoning arc** (the full dialogue that led to the decision), and session ID.
+
+**The append-only invariant:** When D2 overrides D1, D1 is never edited or removed. D2 is a new entry with `supersedes_id=D1` and an explicit rationale. Both decisions remain in the log — the evolution of thinking is always recoverable.
+
+---
+
+## Conflict Detection
+
+Conflict detection runs at two points:
+
+| When | How | Surface |
+|---|---|---|
+| **Capture time** | After any decision is saved, `GET /decisions/:id/conflicts` runs a semantic similarity + LLM contradiction check against recent decisions in the same repo | Inline in the conversation or VS Code warning modal |
+| **Commit time** | Pre-commit hook parses `git diff --cached context_log.md`, extracts new hex IDs, calls conflicts endpoint for each | Terminal output with full prior decision context |
+
+In both cases, the message is the same: *"D1 was captured first — it stands. The WAL is append-only. To make your decision active, add an override entry that supersedes D1 — the full trace is preserved."*
 
 ---
 
 ## Stoa Reasoning Discipline — Integration Status
 
-Reasoning Layer is fully aligned with [Stoa](https://github.com/RelationalAI/stoa-ai) reasoning discipline. Stoa treats design as a first-class engineering activity: topics evolve through refining sessions before settling, the full reasoning arc is recorded alongside the decision, and the connection between decisions and the code that implements them is tracked and enforced.
+Reasoning Layer is fully aligned with Stoa reasoning discipline. Stoa treats design as a first-class engineering activity: topics evolve through conversation before settling, the full reasoning arc is recorded alongside the decision, and the connection between decisions and the code that implements them is tracked and enforced.
 
 | Phase | Status | What it adds |
 |---|---|---|
-| **Phase 1 — WAL Upgrade** | ✅ Shipped | `reasoningArc` field on every entry; `sessionId` FK; rollback validation enforced on all write paths |
-| **Phase 2 — Async Refining Session** | ✅ Shipped | Fire-and-forget Slack routing; interim table WAL entry written immediately; `RefiningSession` + `SessionMessage` models; catch-up cadence at session start; `/settle`, `/wont-do`, `/table` reply prefixes |
-| **Phase 3 — Artifact Coherence** | ✅ Shipped | `TrackedArtifact` + `ArtifactDecisionLink`; drift detection endpoint; pre-commit hook (warn/block); superseded decision warnings in enriched prompts |
-| **Phase 4 — Agent File Cadences** | ✅ Shipped | Pre-task drift check (Cadence A); post-decision propagation pass (Cadence B); both injected into Claude Code agent file automatically |
-| **Phase 5 — Context Log Export** | ✅ Shipped | `GET /repos/:id/context-log` renders full Postgres WAL as Stoa-compatible or ADR-style markdown on demand |
+| **Phase 1 — WAL Upgrade** | ✅ Shipped | `reasoningArc` field; `sessionId` FK; rollback validation on all write paths |
+| **Phase 2 — Async Refining Session** | ✅ Shipped | Fire-and-forget Slack routing; interim WAL entry; catch-up cadence; `/settle`, `/wont-do`, `/table` reply prefixes |
+| **Phase 3 — Artifact Coherence** | ✅ Shipped | `TrackedArtifact` + `ArtifactDecisionLink`; drift detection; pre-commit hook; superseded decision warnings |
+| **Phase 4 — Agent File Cadences** | ✅ Shipped | Pre-task drift check (Cadence A); post-decision propagation (Cadence B); agent file v2.x |
+| **Phase 5 — Context Log Export** | ✅ Shipped | `GET /repos/:id/context-log` renders full Postgres WAL as Stoa or ADR markdown |
+| **Phase 6 — Stoa-Native Capture** | ✅ Shipped | Settling-cue detection; direct WAL capture; `captureDecision` VS Code command; `context_log.md` per repo; question generation opt-in |
+| **Phase 7 — Conflict Detection** | ✅ Shipped | Capture-time + commit-time conflict detection; append-only override flow; rationale surfaced at conflict; pre-commit WAL check |
 
-**Key design decision:** Postgres is the source of truth — no markdown WAL files to maintain. The context log is a derived view generated from the database, giving teams the human-readable audit trail without the maintenance burden.
+**Key design decisions:**
+- Postgres is the source of truth — no markdown WAL files to maintain. `context_log.md` is a derived view that agents and developers can read without calling the API.
+- Conflict detection is query-time (no persistence) — LLM reranking over recent decisions, no pgvector required.
+- First-captured wins — the `created_at` timestamp in Postgres determines precedence; the pre-commit hook enforces this at commit time.

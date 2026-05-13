@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../db.js";
 import type { DecisionRow } from "../types.js";
 import { findSimilarDecisions, embeddingAvailable, embedDecision } from "../llm/embedder.js";
+import { detectConflicts, conflictDetectionAvailable } from "../llm/conflictDetector.js";
 import { upsertRepo, resolveRepoId } from "../db/repos.js";
 
 const ENTRY_TYPES = ["decision", "wont_do", "table", "branch", "rollback", "observation"] as const;
@@ -209,8 +210,13 @@ export const decisionRoutes: FastifyPluginAsync = async (app) => {
       return reply.badRequest("supersedes_id is required when entry_type is rollback");
     }
     if (d.supersedes_id) {
-      const target = await prisma.decision.findUnique({ where: { id: d.supersedes_id } });
+      const target = await prisma.decision.findFirst({
+        where: { OR: [{ id: d.supersedes_id }, { hexId: d.supersedes_id }] },
+        select: { id: true },
+      });
       if (!target) return reply.badRequest(`supersedes_id ${d.supersedes_id} does not match any existing decision`);
+      // Normalise to UUID so the FK is always a UUID
+      d.supersedes_id = target.id;
     }
 
     const hexId = Math.random().toString(16).slice(2, 9);
@@ -267,13 +273,18 @@ export const decisionRoutes: FastifyPluginAsync = async (app) => {
 
       const decisions = await prisma.decision.findMany({
         where: {
-          createdAt: { gt: sinceDate },
-          ...(repoId
-            ? { OR: [{ repoId }, { linkedRepo: repo }] }
-            : repo ? { linkedRepo: repo } : {}),
-          question: {
-            status: { in: ["resolved", "answered_locally"] },
-          },
+          AND: [
+            { createdAt: { gt: sinceDate } },
+            ...(repoId
+              ? [{ OR: [{ repoId }, { linkedRepo: repo }] }]
+              : repo ? [{ linkedRepo: repo }] : []),
+            {
+              OR: [
+                { question: { status: { in: ["resolved", "answered_locally"] } } },
+                { questionId: null },
+              ],
+            },
+          ],
         },
         include: {
           question: { include: { prompt: true } },
@@ -286,10 +297,14 @@ export const decisionRoutes: FastifyPluginAsync = async (app) => {
         return reply.header("Content-Type", "text/plain; charset=utf-8").send("");
       }
 
-      // Group by prompt so each session is one block (skip orphaned decisions with no question)
+      // Group by prompt (question-pipeline) or collect as direct-capture (no question)
       const byPrompt = new Map<string, typeof decisions>();
+      const directCapture: typeof decisions = [];
       for (const d of decisions) {
-        if (!d.question) continue;
+        if (!d.question) {
+          directCapture.push(d);
+          continue;
+        }
         const pid = d.question.promptId;
         if (!byPrompt.has(pid)) byPrompt.set(pid, []);
         byPrompt.get(pid)!.push(d);
@@ -338,11 +353,101 @@ export const decisionRoutes: FastifyPluginAsync = async (app) => {
         blocks.push(lines.join("\n"));
       }
 
+      // Direct-capture decisions (created via settling cues or Capture Decision command — no question)
+      for (const d of directCapture) {
+        const ts = d.createdAt.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+        const typeLabel = ENTRY_TYPE_LABELS[d.entryType] ?? d.entryType;
+        const hexRef = d.hexId ? ` · \`${d.hexId}\`` : "";
+        const displayText = d.entryType === "wont_do" ? `~~${d.questionText}~~` : d.questionText;
+        const lines: string[] = [
+          `## ${ts} — Direct Capture`,
+          ``,
+          `### ${typeLabel}${hexRef} — ${displayText}`,
+          ``,
+          `> ${d.answer}`,
+          ``,
+        ];
+        if (d.rationale) lines.push(`*Rationale:* ${d.rationale}`, ``);
+        if (d.alternativesConsidered) lines.push(`*Alternatives considered:* ${d.alternativesConsidered}`, ``);
+        if (d.reopenCondition) lines.push(`*Revisit if:* ${d.reopenCondition}`, ``);
+        if (d.reasoningArc) lines.push(`*Reasoning arc:* ${d.reasoningArc}`, ``);
+        if (d.supersededBy) {
+          const supNum = String(d.supersededBy.decisionNumber).padStart(3, "0");
+          lines.push(`*Supersedes:* ADR-${supNum} · \`${d.supersededBy.hexId}\``, ``);
+        }
+        if (d.reviewerSlackId) lines.push(`*Decided by:* <@${d.reviewerSlackId}>`, ``);
+        lines.push(`---`, ``);
+        blocks.push(lines.join("\n"));
+      }
+
       return reply
         .header("Content-Type", "text/plain; charset=utf-8")
         .send(blocks.join("\n"));
     }
   );
+
+  // Conflict detection for a single decision.
+  // Finds semantically similar decisions in the same repo and classifies contradictions via LLM.
+  // Accepts UUID or hexId as :id. Returns empty conflicts array if API key unavailable.
+  app.get<{ Params: { id: string } }>("/decisions/:id/conflicts", async (req, reply) => {
+    const { id } = req.params;
+
+    const decision = await prisma.decision.findFirst({
+      where: { OR: [{ id }, { hexId: id }] },
+      select: {
+        id: true,
+        hexId: true,
+        questionText: true,
+        answer: true,
+        repoId: true,
+        linkedRepo: true,
+      },
+    });
+    if (!decision) return reply.notFound("Decision not found");
+
+    if (!conflictDetectionAvailable()) {
+      return { conflicts: [], mode: "unavailable" };
+    }
+
+    const { results } = await findSimilarDecisions({
+      text: decision.questionText,
+      repoId: decision.repoId ?? undefined,
+      repo: decision.linkedRepo ?? undefined,
+      limit: 8,
+    });
+
+    const candidates = results
+      .filter((r) => r.decision_id !== decision.id)
+      .map((r) => ({
+        decision_id: r.decision_id,
+        hex_id: r.hex_id,
+        question_text: r.question_text,
+        answer: r.answer,
+        rationale: r.rationale,
+        created_at: r.created_at,
+      }));
+    if (candidates.length === 0) {
+      return { conflicts: [], mode: "semantic" };
+    }
+
+    const conflicts = await detectConflicts({
+      decision: { question_text: decision.questionText, answer: decision.answer },
+      candidates,
+    });
+
+    return {
+      conflicts: conflicts.map((c) => ({
+        decision_id: c.decision_id,
+        hex_id: c.hex_id,
+        question_text: c.question_text,
+        answer: c.answer,
+        rationale: c.rationale,
+        created_at: c.created_at,
+        reason: c.reason,
+      })),
+      mode: "semantic",
+    };
+  });
 
   // Semantic similarity search over the decision store.
   // With OPENAI_API_KEY: embeds the query text and uses pgvector cosine similarity.

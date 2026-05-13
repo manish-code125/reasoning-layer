@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { embedDecision } from "../llm/embedder.js";
+import { detectConflictsBatch, conflictDetectionAvailable } from "../llm/conflictDetector.js";
 import { upsertRepo } from "../db/repos.js";
 
 const AddMessageBody = z.object({
@@ -74,17 +75,38 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         orderBy: { createdAt: "desc" },
       });
 
+      const settledSince = settledDecisions.map((d) => ({
+        decision_id: d.id,
+        hex_id: d.hexId,
+        entry_type: d.entryType,
+        question_text: d.questionText,
+        answer: d.answer,
+        rationale: d.rationale,
+        reasoning_arc: d.reasoningArc,
+        created_at: d.createdAt.toISOString(),
+      }));
+
+      // Detect conflicts among recently settled decisions — single LLM call, best-effort
+      let conflicts: { hex_a: string; hex_b: string; reason: string }[] = [];
+      if (settledDecisions.length >= 2 && conflictDetectionAvailable()) {
+        try {
+          conflicts = await detectConflictsBatch(
+            settledDecisions.map((d) => ({
+              decision_id: d.id,
+              hex_id: d.hexId,
+              question_text: d.questionText,
+              answer: d.answer,
+              rationale: d.rationale,
+              created_at: d.createdAt.toISOString(),
+            }))
+          );
+        } catch {
+          // never fail the catch-up on conflict detection error
+        }
+      }
+
       return {
-        settled_since: settledDecisions.map((d) => ({
-          decision_id: d.id,
-          hex_id: d.hexId,
-          entry_type: d.entryType,
-          question_text: d.questionText,
-          answer: d.answer,
-          rationale: d.rationale,
-          reasoning_arc: d.reasoningArc,
-          created_at: d.createdAt.toISOString(),
-        })),
+        settled_since: settledSince,
         in_flight: openSessions.map((s) => ({
           session_id: s.id,
           question_id: s.questionId,
@@ -94,6 +116,7 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
           turn_count: s.messages.length,
           created_at: s.createdAt.toISOString(),
         })),
+        conflicts,
       };
     }
   );

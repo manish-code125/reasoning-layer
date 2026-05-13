@@ -4,6 +4,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { apiGetText, repoPath } from "../api/client";
 
+const CONTEXT_LOG_ATTR_LINE = "context_log.md merge=union";
+
 const LOG_HEADER =
   "# Decision Log\n\nAppend-only log of architectural decisions. Do not edit past entries.\n\n---\n\n";
 
@@ -69,10 +71,26 @@ export async function syncLog(): Promise<void> {
     if (!existing.includes("decision.log.md")) {
       fs.appendFileSync(attrPath, "\n" + attrLine + "\n", "utf8");
     }
+    if (!existing.includes("context_log.md")) {
+      fs.appendFileSync(attrPath, "\n" + CONTEXT_LOG_ATTR_LINE + "\n", "utf8");
+    }
+  }
+
+  // Sync context_log.md — full replace from the canonical WAL endpoint (best-effort)
+  const ctxPath = path.join(repo, "context_log.md");
+  try {
+    const ctxContent = await apiGetText(
+      `/api/repos/${encodeURIComponent(repo)}/context-log?format=stoa`
+    );
+    if (ctxContent.trim()) {
+      fs.writeFileSync(ctxPath, ctxContent, "utf8");
+    }
+  } catch {
+    // backend unreachable or no decisions yet — skip silently
   }
 
   try {
-    execSync("git add decision.log.md .gitattributes", { cwd: repo });
+    execSync("git add decision.log.md .gitattributes context_log.md", { cwd: repo });
     const date = new Date().toISOString().slice(0, 10);
     execSync(`git commit -m "decisions: sync ${date}"`, { cwd: repo });
   } catch (err) {

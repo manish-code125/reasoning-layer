@@ -2,7 +2,7 @@
   "name": "reasoning-layer",
   "displayName": "Reasoning Layer",
   "description": "Async stakeholder clarification for AI-assisted development — surfaces ambiguity, routes questions to Slack, and injects past decisions as context.",
-  "version": "0.3.0",
+  "version": "0.4.2",
   "publisher": "reasoning-layer",
   "engines": {
     "vscode": "^1.85.0"
@@ -18,8 +18,12 @@
   "contributes": {
     "commands": [
       {
+        "command": "reasoning-layer.captureDecision",
+        "title": "Reasoning Layer: Capture Decision"
+      },
+      {
         "command": "reasoning-layer.analyzePrompt",
-        "title": "Reasoning Layer: Analyze Prompt"
+        "title": "Reasoning Layer: Generate Questions for Task"
       },
       {
         "command": "reasoning-layer.listPending",
