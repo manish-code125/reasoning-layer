@@ -5,7 +5,7 @@ import { prisma } from "../db.js";
 const ContextLogQuery = z.object({
   since: z.string().optional(),
   type: z.string().optional(),
-  format: z.enum(["stoa", "adr"]).default("stoa"),
+  format: z.enum(["narrative", "adr"]).default("narrative"),
 });
 
 async function resolveRepo(idOrPath: string) {
@@ -31,7 +31,7 @@ type DecisionForLog = {
   supersedes: { hexId: string }[];           // decisions that supersede this one
 };
 
-function formatStoa(decisions: DecisionForLog[], repoPath: string): string {
+function formatNarrative(decisions: DecisionForLog[], repoPath: string): string {
   if (decisions.length === 0) return `# Context Log — ${repoPath}\n\n_No decisions recorded yet._\n`;
 
   const header = [
@@ -157,7 +157,7 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
   // Query params:
   //   ?since=<iso>          — entries after this timestamp
   //   ?type=<entry_type>    — filter by decision type
-  //   ?format=stoa|adr      — output format (default: stoa)
+  //   ?format=narrative|adr  — output format (default: narrative)
   app.get<{
     Params: { id: string };
     Querystring: { since?: string; type?: string; format?: string };
@@ -200,7 +200,7 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
 
     const markdown = format === "adr"
       ? formatAdr(decisions, repo.path)
-      : formatStoa(decisions, repo.path);
+      : formatNarrative(decisions, repo.path);
 
     return reply
       .header("Content-Type", "text/markdown; charset=utf-8")

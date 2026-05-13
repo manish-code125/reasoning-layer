@@ -341,7 +341,7 @@ async function enrichContext(): Promise<void> {
 const IGNORE_PATTERNS = [
   "**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.next/**",
   "**/out/**", "**/coverage/**", "**/*.generated.*", "**/*.lock", "**/pnpm-lock.yaml",
-  "**/package-lock.json", "**/.stoa/**", "**/.claude/**",
+  "**/package-lock.json", "**/.rl/**","**/.claude/**",
 ];
 
 function gitLastCommitTs(filePath: string, root: string): string | null {

@@ -1,7 +1,6 @@
 # Reasoning Layer — Implementation Phases
 
-This document tracks the phased implementation plan for integrating Stoa reasoning discipline
-into the Reasoning Layer pipeline.
+This document tracks the phased implementation plan for the Reasoning Layer pipeline.
 
 All decision data lives in **Postgres** — no markdown WAL files. Context logs and exports are
 derived views generated from the database on demand.
@@ -35,7 +34,7 @@ sessions will populate it.
 **Goal:** Questions are fire-and-forget from the developer's perspective. Routing a question
 does not block the developer — they state an interim assumption and proceed immediately.
 Answers land asynchronously into the WAL and are surfaced at the next natural checkpoint,
-mirroring how Stoa's async ask pattern works.
+mirroring an async ask pattern where answers drift in rather than blocking the developer.
 
 ### Core mental model
 
@@ -199,7 +198,7 @@ moves ahead of the WAL. Optionally block commits to tracked files without a corr
 
 Without this phase, decisions and code are disconnected — a decision is made in Slack, stored
 in Postgres, but nothing checks whether the relevant source files were actually updated to
-reflect it. Stoa calls this the design↔code loop. Phase 3 closes it.
+reflect it. The design↔code loop. Phase 3 closes it.
 
 ### New schema
 
@@ -272,7 +271,7 @@ Response shape:
 
 ### VS Code command: `Reasoning Layer: Init Artifacts`
 
-Equivalent of `/stoa init`. Runs a guided scan of the workspace:
+Runs a guided scan of the workspace:
 
 1. Reads the workspace file tree, excluding `node_modules/`, `.git/`, `dist/`, build artifacts,
    and auto-generated files (detected by header markers)
@@ -284,8 +283,7 @@ Equivalent of `/stoa init`. Runs a guided scan of the workspace:
 
 ### VS Code command: `Reasoning Layer: Track File`
 
-Single-file tracking — equivalent of `/stoa track <path>`. Tracks the currently open file
-with an optional description prompt.
+Single-file tracking. Tracks the currently open file with an optional description prompt.
 
 ### Enrichment upgrade
 
@@ -311,7 +309,7 @@ Writes `.githooks/pre-commit` to the workspace root. On `git commit`:
    - **Block mode** (opt-in via `reasoning-layer.hookMode: "block"`): exits non-zero,
      blocking the commit until the developer acknowledges or creates a new WAL entry
 
-Wired via `git config core.hooksPath .githooks` — same pattern as Stoa.
+Wired via `git config core.hooksPath .githooks`.
 
 Hook behaviour is configurable in VS Code settings:
 ```json
@@ -333,7 +331,7 @@ The `scripts/pre-commit` file and `scripts/install-coherence-hook.sh` are tempor
 
 ## Phase 4 — Agent File Coherence Cadences ✅ Shipped
 
-**Goal:** Add two Stoa-style coherence cadences to the Claude Code agent file
+**Goal:** Add two coherence cadences to the Claude Code agent file
 (`.claude/reasoning-layer.md`) so drift is surfaced proactively without developer action.
 
 ### What shipped
@@ -381,14 +379,14 @@ This closes the decision→code loop in the same session rather than leaving it 
 
 ## Phase 5 — Context Log Export ✅ Shipped
 
-**Goal:** Generate Stoa-compatible markdown from Postgres on demand. The database is the
+**Goal:** Generate readable markdown from Postgres on demand. The database is the
 source of truth; the markdown is a derived view.
 
 ### New API endpoint
 
 `GET /api/repos/:id/context-log`
 
-Renders the full WAL for a repo as Stoa-formatted markdown:
+Renders the full WAL for a repo as narrative markdown:
 
 ```markdown
 ## a3f2e71 — decision — 2026-05-12
@@ -423,18 +421,18 @@ The archive table approach keeps the main table clean.
 Accepts query params:
 - `?since=<iso>` — entries after a date
 - `?type=<entry_type>` — filter by type
-- `?format=stoa` (default) or `?format=adr`
+- `?format=narrative` (default) or `?format=adr`
 
 ### What shipped
 
 | Change | Detail |
 |---|---|
-| `GET /api/repos/:id/context-log` | Full WAL as Stoa-formatted markdown; also supports `?format=adr` for ADR table layout |
+| `GET /api/repos/:id/context-log` | Full WAL as narrative markdown; also supports `?format=adr` for ADR table layout |
 | `?since=<iso>` filter | Returns only entries after the given timestamp — useful for incremental export |
 | `?type=<entry_type>` filter | Filter by entry type (decision, rollback, wont_do, table, observation) |
 | Superseded warnings inline | Rolled-back decisions show ⚠ Superseded by `<hexId>` so readers can't miss them |
 | `Content-Disposition: attachment` | Browser download works out of the box — `context_log.md` |
-| Stoa + ADR dual format | `formatStoa()` renders narrative prose; `formatAdr()` renders decision tables with metadata |
+| Narrative + ADR dual format | `formatNarrative()` renders narrative prose; `formatAdr()` renders decision tables with metadata |
 | Agent file Step 0c | On-demand context log fetch added to `.claude/reasoning-layer.md` v1.6.0 |
 
 ### New VS Code command: `Reasoning Layer: Export Context Log`
@@ -456,7 +454,7 @@ and is gitignore-able if the team prefers database-only storage.
 | **2 — Async Refining Session** | ✅ Shipped | Fire-and-forget routing; interim table WAL entry; catch-up cadence; reviewer settles with `/settle` |
 | **3 — Artifact Coherence** | ✅ Shipped | Track files → link to decisions → drift detection → pre-commit hook → superseded decision warnings |
 | **4 — Agent File Cadences** | ✅ Shipped | Step 0b: pre-task drift check; Step 3c: post-decision propagation pass; drift window shrinks from days → seconds |
-| **5 — Context Log Export** | ✅ Shipped | `GET /repos/:id/context-log` renders full WAL as Stoa/ADR markdown on demand from Postgres |
+| **5 — Context Log Export** | ✅ Shipped | `GET /repos/:id/context-log` renders full WAL as narrative/ADR markdown on demand from Postgres |
 
 ### Implementation order
 

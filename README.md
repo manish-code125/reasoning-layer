@@ -115,7 +115,7 @@ Each entry stores the answer, rationale, alternatives considered, reopen conditi
 | `POST` | `/api/repos/:id/artifacts` | Register a file as a tracked artifact |
 | `POST` | `/api/artifacts/drift` | Check which tracked files have decisions newer than their last commit |
 | `POST` | `/api/decisions/:id/link-artifacts` | Link a decision to tracked files |
-| `GET` | `/api/repos/:id/context-log` | Full WAL as Stoa or ADR markdown (`?format=stoa\|adr&since=&type=`) |
+| `GET` | `/api/repos/:id/context-log` | Full WAL as narrative or ADR markdown (`?format=narrative\|adr&since=&type=`) |
 
 ---
 
@@ -133,9 +133,7 @@ See [HOW_TO_USE.md](HOW_TO_USE.md) for full local setup, VS Code extension insta
 
 ---
 
-## Stoa integration
-
-Reasoning Layer is fully aligned with [Stoa](https://github.com/RelationalAI/stoa-ai) reasoning discipline — all five phases shipped:
+## Implementation phases
 
 | Phase | What it delivers |
 |---|---|
@@ -143,6 +141,8 @@ Reasoning Layer is fully aligned with [Stoa](https://github.com/RelationalAI/sto
 | **2 — Async Refining Session** | Fire-and-forget Slack routing; interim WAL entry; catch-up cadence |
 | **3 — Artifact Coherence** | Tracked files linked to decisions; drift detection; pre-commit hook |
 | **4 — Agent File Cadences** | Pre-task drift check; post-decision propagation — both in the Claude Code agent file |
-| **5 — Context Log Export** | Full WAL as Stoa/ADR markdown on demand from Postgres |
+| **5 — Context Log Export** | Full WAL as narrative/ADR markdown on demand from Postgres |
+| **6 — Conversation-native Capture** | Settling-cue detection; direct WAL capture without a question pipeline; `captureDecision` command |
+| **7 — Conflict Detection** | Capture-time + commit-time conflict detection; append-only override flow |
 
 See [docs/PHASES.md](docs/PHASES.md) for the full implementation detail and [EXECUTIVE_SUMMARY.md](EXECUTIVE_SUMMARY.md) for the architecture overview.

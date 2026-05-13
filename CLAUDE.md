@@ -1,7 +1,5 @@
 @.claude/reasoning-layer.md
 
-@stoa.md
-
 # CLAUDE.md — Reasoning Layer
 
 ## What this project is
@@ -103,7 +101,7 @@ Decisions and prompts are scoped to a `Repo` record (table: `repos`, field: `pat
 
 ## WAL discipline (Phases 1–5 — fully shipped)
 
-Decisions are proper **append-only WAL entries**. All five Stoa integration phases are live:
+Decisions are proper **append-only WAL entries**. All five WAL integration phases are live:
 
 - `reasoningArc String?` — the dialogue context that led to this entry. Assembled from `SessionMessage` records when a `RefiningSession` settles; `null` for fast-path Q→A answers.
 - `sessionId String?` — FK to `RefiningSession`. Populated when a question is routed to Slack.
@@ -114,7 +112,7 @@ Decisions are proper **append-only WAL entries**. All five Stoa integration phas
 - **Phase 2 — Async Refining Session:** `RefiningSession` + `SessionMessage` models; fire-and-forget routing; interim `table` WAL entry written immediately; catch-up cadence at session start; `/settle`, `/wont-do`, `/table` reply prefixes in Slack thread
 - **Phase 3 — Artifact Coherence:** `TrackedArtifact` + `ArtifactDecisionLink`; `POST /artifacts/drift`; pre-commit hook (`scripts/pre-commit`); superseded decision warnings in enriched prompts
 - **Phase 4 — Agent File Cadences:** Step 0b pre-task drift check (Cadence A); Step 3c post-decision propagation pass (Cadence B); both in `.claude/reasoning-layer.md` v1.6.0
-- **Phase 5 — Context Log Export:** `GET /repos/:id/context-log` renders full WAL as Stoa or ADR markdown from Postgres; filters: `?since`, `?type`, `?format`
+- **Phase 5 — Context Log Export:** `GET /repos/:id/context-log` renders full WAL as narrative or ADR markdown from Postgres; filters: `?since`, `?type`, `?format`
 
 ---
 

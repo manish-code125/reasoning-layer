@@ -80,7 +80,7 @@ export async function syncLog(): Promise<void> {
   const ctxPath = path.join(repo, "context_log.md");
   try {
     const ctxContent = await apiGetText(
-      `/api/repos/${encodeURIComponent(repo)}/context-log?format=stoa`
+      `/api/repos/${encodeURIComponent(repo)}/context-log?format=narrative`
     );
     if (ctxContent.trim()) {
       fs.writeFileSync(ctxPath, ctxContent, "utf8");

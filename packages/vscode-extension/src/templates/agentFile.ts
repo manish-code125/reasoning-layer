@@ -260,16 +260,16 @@ import urllib.request, os
 BACKEND = "{{BACKEND_URL}}"
 repo = os.getcwd()
 
-# ?format=stoa  (default) — narrative Stoa-style log
+# ?format=narrative  (default) — narrative markdown log
 # ?format=adr           — ADR table format
 # ?since=<iso>          — entries after a date
 # ?type=<entry_type>    — filter by type (decision, rollback, wont_do, table, observation)
-url = f"{BACKEND}/api/repos/{urllib.request.quote(repo, safe='')}/context-log?format=stoa"
+url = f"{BACKEND}/api/repos/{urllib.request.quote(repo, safe='')}/context-log?format=narrative"
 print(urllib.request.urlopen(url).read().decode())
 PYEOF
 \`\`\`
 
-The output is a full WAL rendered as Stoa-compatible markdown — append-only, newest entries last,
+The output is a full WAL rendered as narrative markdown — append-only, newest entries last,
 superseded decisions clearly flagged. Paste it directly into the conversation when the developer
 needs a birds-eye view of all past decisions for this repo.
 

@@ -281,7 +281,7 @@ In `block` mode, the commit is prevented. In `warn` mode (default), it proceeds 
 
 Ask Claude: *"Show me the full decision history for this repo."*
 
-Claude fetches and prints the WAL as Stoa-formatted markdown from `context_log.md` (local) or `GET /repos/:id/context-log` (full Postgres WAL):
+Claude fetches and prints the WAL as narrative markdown from `context_log.md` (local) or `GET /repos/:id/context-log` (full Postgres WAL):
 
 ```markdown
 ## `a3f2e71` — decision — 2026-05-09
@@ -297,7 +297,7 @@ Claude fetches and prints the WAL as Stoa-formatted markdown from `context_log.m
 
 You can also fetch directly:
 ```bash
-# Stoa format (default)
+# Narrative format (default)
 curl "http://44.200.186.86/reasoning/api/repos/<repo-id>/context-log"
 
 # ADR table format
@@ -375,7 +375,7 @@ curl http://localhost:3002/api/decisions/export > DECISIONS.md
 # Export since a date (used by decision log sync)
 curl "http://localhost:3002/api/decisions/export-since?repo=/your/project&since=2026-01-01T00:00:00Z"
 
-# Full context log as Stoa markdown
+# Full context log as narrative markdown
 curl "http://localhost:3002/api/repos/<repo-id-or-path>/context-log" > context_log.md
 
 # Conflict check for a specific decision

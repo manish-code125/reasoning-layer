@@ -14,7 +14,7 @@ A fourth problem appears in team settings: two developers working in parallel ca
 
 An ambient reasoning layer that sits between the developer and their AI agent. It has two modes that complement each other:
 
-### Default — Capture mode (Stoa-native)
+### Default — Capture mode (conversation-native)
 
 The agent watches your conversation for **settling cues** — phrases like "let's go with this", "locked", "go ahead", "yes apply". When one fires:
 
@@ -134,7 +134,7 @@ Pre-commit hook (installed automatically by VS Code extension)
 
 ---
 
-## WAL Entry Types (Stoa-aligned)
+## WAL Entry Types
 
 Every decision is stored as an append-only WAL entry — never edited, never deleted. The full trace of overrides is always recoverable.
 
@@ -166,9 +166,9 @@ In both cases, the message is the same: *"D1 was captured first — it stands. T
 
 ---
 
-## Stoa Reasoning Discipline — Integration Status
+## Implementation Status
 
-Reasoning Layer is fully aligned with Stoa reasoning discipline. Stoa treats design as a first-class engineering activity: topics evolve through conversation before settling, the full reasoning arc is recorded alongside the decision, and the connection between decisions and the code that implements them is tracked and enforced.
+The Reasoning Layer treats design as a first-class engineering activity: topics evolve through conversation before settling, the full reasoning arc is recorded alongside the decision, and the connection between decisions and the code that implements them is tracked and enforced.
 
 | Phase | Status | What it adds |
 |---|---|---|
@@ -176,8 +176,8 @@ Reasoning Layer is fully aligned with Stoa reasoning discipline. Stoa treats des
 | **Phase 2 — Async Refining Session** | ✅ Shipped | Fire-and-forget Slack routing; interim WAL entry; catch-up cadence; `/settle`, `/wont-do`, `/table` reply prefixes |
 | **Phase 3 — Artifact Coherence** | ✅ Shipped | `TrackedArtifact` + `ArtifactDecisionLink`; drift detection; pre-commit hook; superseded decision warnings |
 | **Phase 4 — Agent File Cadences** | ✅ Shipped | Pre-task drift check (Cadence A); post-decision propagation (Cadence B); agent file v2.x |
-| **Phase 5 — Context Log Export** | ✅ Shipped | `GET /repos/:id/context-log` renders full Postgres WAL as Stoa or ADR markdown |
-| **Phase 6 — Stoa-Native Capture** | ✅ Shipped | Settling-cue detection; direct WAL capture; `captureDecision` VS Code command; `context_log.md` per repo; question generation opt-in |
+| **Phase 5 — Context Log Export** | ✅ Shipped | `GET /repos/:id/context-log` renders full Postgres WAL as narrative or ADR markdown |
+| **Phase 6 — Conversation-native Capture** | ✅ Shipped | Settling-cue detection; direct WAL capture; `captureDecision` VS Code command; `context_log.md` per repo; question generation opt-in |
 | **Phase 7 — Conflict Detection** | ✅ Shipped | Capture-time + commit-time conflict detection; append-only override flow; rationale surfaced at conflict; pre-commit WAL check |
 
 **Key design decisions:**

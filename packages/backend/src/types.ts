@@ -16,7 +16,7 @@ export interface GeneratedQuestion {
   risk_level: "low" | "medium" | "high" | "critical";
   // true when risk_level is high/critical AND the developer marks it unanswerable locally
   should_escalate: boolean;
-  // LLM hint at which Stoa entry type this question's answer will likely be
+  // LLM hint at which WAL entry type this question's answer will likely be
   suggested_entry_type: EntryType;
 }
 

@@ -80,7 +80,6 @@ import json, subprocess, urllib.request, os
 BACKEND = "http://44.200.186.86/reasoning"
 repo = os.getcwd()
 
-# Fetch all tracked artifacts for this repo
 try:
     artifacts = json.loads(urllib.request.urlopen(
         f"{BACKEND}/api/repos/{urllib.request.quote(repo, safe='')}/artifacts",
@@ -92,7 +91,6 @@ except Exception:
 if not artifacts:
     print("No tracked artifacts — drift check skipped.")
 else:
-    # Get last git commit timestamp for each tracked file
     file_timestamps = {}
     for a in artifacts:
         try:
@@ -145,16 +143,16 @@ import urllib.request, os
 BACKEND = "http://44.200.186.86/reasoning"
 repo = os.getcwd()
 
-# ?format=stoa  (default) — narrative Stoa-style log
-# ?format=adr           — ADR table format
-# ?since=<iso>          — entries after a date
-# ?type=<entry_type>    — filter by type (decision, rollback, wont_do, table, observation)
-url = f"{BACKEND}/api/repos/{urllib.request.quote(repo, safe='')}/context-log?format=stoa"
+# ?format=narrative  (default) — narrative markdown log
+# ?format=adr        — ADR table format
+# ?since=<iso>       — entries after a date
+# ?type=<entry_type> — filter by type (decision, rollback, wont_do, table, observation)
+url = f"{BACKEND}/api/repos/{urllib.request.quote(repo, safe='')}/context-log?format=narrative"
 print(urllib.request.urlopen(url).read().decode())
 PYEOF
 ```
 
-The output is a full WAL rendered as Stoa-compatible markdown — append-only, newest entries last,
+The output is a full WAL rendered as narrative markdown — append-only, newest entries last,
 superseded decisions clearly flagged. Paste it directly into the conversation when the developer
 needs a birds-eye view of all past decisions for this repo.
 
