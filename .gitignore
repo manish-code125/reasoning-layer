@@ -6,3 +6,5 @@ postgres_data/
 .DS_Store
 *.js.map
 prisma/migrations/
+packages/vscode-extension/*.vsix
+!packages/vscode-extension/reasoning-layer-0.4.2.vsix

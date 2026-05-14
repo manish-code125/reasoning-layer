@@ -2,7 +2,46 @@
   "permissions": {
     "allow": [
       "Bash(git -C /Users/manishkumar/Documents/reasoning-layer status)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(gh repo *)",
+      "Bash(git config *)",
+      "Bash(git push *)",
+      "Bash(rsync -az packages/backend/src/ -e 'ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no' ubuntu@44.200.186.86:~/reasoning-layer/packages/backend/src/)",
+      "Bash(rsync -az packages/backend/prisma/ -e 'ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no' ubuntu@44.200.186.86:~/reasoning-layer/packages/backend/prisma/)",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'cd ~/reasoning-layer/packages/backend && npx prisma migrate deploy 2>&1 && npx prisma generate 2>&1 | tail -5')",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'pm2 logs reasoning-layer --lines 5 --nostream')",
+      "Bash(gh auth *)",
+      "Bash(git remote *)",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'cd ~/reasoning-layer/packages/backend && npx prisma migrate deploy 2>&1 && npx prisma generate 2>&1 | tail -3')",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'pm2 logs reasoning-layer --lines 4 --nostream')",
+      "Bash(pnpm db:migrate)",
+      "Bash(npx prisma *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(rsync -az /Users/manishkumar/Documents/reasoning-layer/packages/backend/src/ -e 'ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no' ubuntu@44.200.186.86:~/reasoning-layer/packages/backend/src/)",
+      "Bash(rsync -az /Users/manishkumar/Documents/reasoning-layer/packages/backend/prisma/ -e 'ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no' ubuntu@44.200.186.86:~/reasoning-layer/packages/backend/prisma/)",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'cd ~/reasoning-layer/packages/backend && npx prisma generate 2>&1 | tail -3 && pm2 status reasoning-layer 2>&1 | tail -5')",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'pm2 logs reasoning-layer --lines 20 --nostream 2>&1')",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'pm2 logs reasoning-layer --lines 8 --nostream 2>&1')",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'pm2 restart reasoning-layer && sleep 4 && pm2 logs reasoning-layer --lines 6 --nostream 2>&1')",
+      "Bash(curl -s \"http://44.200.186.86/reasoning/api/sessions/catch-up?repo=/tmp/test&since=2020-01-01T00:00:00Z\")",
+      "Bash(curl -s \"http://44.200.186.86/reasoning/api/sessions/nonexistent-id\")",
+      "Bash(curl -s \"http://44.200.186.86/reasoning/api/questions/nonexistent/route\" -X POST -H \"Content-Type: application/json\" -d '{\"assumption\":\"test\"}')",
+      "Bash(chmod +x /Users/manishkumar/Documents/reasoning-layer/packages/backend/scripts/pre-commit /Users/manishkumar/Documents/reasoning-layer/packages/backend/scripts/install-coherence-hook.sh)",
+      "Bash(rsync -az /Users/manishkumar/Documents/reasoning-layer/packages/backend/scripts/ -e 'ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no' ubuntu@44.200.186.86:~/reasoning-layer/packages/backend/scripts/)",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'pm2 restart reasoning-layer && sleep 4 && pm2 logs reasoning-layer --lines 4 --nostream 2>&1')",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'pm2 restart reasoning-layer && sleep 4 && pm2 logs reasoning-layer --lines 3 --nostream 2>&1')",
+      "Bash(rsync -az packages/backend/src/ -e 'ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no' ubuntu@44.200.186.86:~/reasoning-layer/packages/backend/src/ --progress)",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'pm2 restart reasoning-layer && sleep 3 && pm2 show reasoning-layer | grep -E '\\\\''status|restarts|uptime'\\\\''')",
+      "Bash(ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no ubuntu@44.200.186.86 'curl -s http://localhost:3002/health')",
+      "Bash(npm run *)",
+      "Bash(xargs cat)",
+      "Bash(rsync -az --delete -e 'ssh -i /Users/manishkumar/Documents/skills/agent_cost_optimization/deploy/tokenscope-key.pem -o StrictHostKeyChecking=no' /Users/manishkumar/Documents/reasoning-layer/packages/backend/src/ ubuntu@44.200.186.86:~/reasoning-layer/packages/backend/src/)",
+      "Bash(git check-ignore *)",
+      "Bash(git ls-files *)",
+      "Bash(git rm *)"
+    ],
+    "additionalDirectories": [
+      "/Users/manishkumar/Documents/reasoning-layer/.claude/commands"
     ]
   }
 }

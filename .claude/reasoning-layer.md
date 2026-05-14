@@ -1,4 +1,4 @@
-# Reasoning Layer — Ambient Decision Agent v1.6.0
+# Reasoning Layer — Ambient Decision Agent v2.0.1
 
 > Managed by the Reasoning Layer VS Code extension. Do NOT edit — overwritten on activation.
 
@@ -6,18 +6,119 @@
 
 ## Your job
 
-Before acting on any non-trivial developer task, run the pipeline below using your Bash tool.
-Everything happens inline in this conversation — the developer should never need to open another tool.
+Two modes. Use them based on context — never force the developer through a pipeline they didn't ask for.
 
-Skip the pipeline only for:
+**Default — Capture mode:** Watch this conversation for settling cues (defined below).
+When a cue fires, synthesize the decision and either capture it silently or propose a WAL entry inline.
+On capture, write to Postgres + append to `context_log.md` in the repo. No prompt submission. No question generation.
+
+**Opt-in — Analyze mode:** Run Steps 1–4 only when the developer explicitly says
+"analyze this", "generate questions for this task", or uses `/decide`.
+Slack routing stays fully available in this mode.
+
+Skip both modes for:
 - Typo / comment / formatting edits
 - Tasks prefixed with `[skip-rl]`
-- Follow-up turns where the pipeline already ran for this task
+- Follow-up turns where a mode already ran for this task
 
-**Key principle (Phase 2):** Questions routed to Slack do NOT block the developer.
-When a question is routed, an interim working assumption is written to the WAL immediately
-and the developer proceeds. Answers arrive asynchronously and are surfaced at the next
-session start via the catch-up cadence below.
+---
+
+## Settling cue detection (Capture mode — always on)
+
+After every developer turn, scan the message (case-insensitive) for settling cues.
+
+**Unambiguous cues — capture silently, then show one-line confirmation:**
+`locked` · `let's go with` · `settled` · `yes apply` · `go ahead` · `yes do it` · `sounds right`
+
+**Ambiguous cues — show proposed entry first, wait for developer confirmation:**
+`next` · `commit` · `push` · `compact` · `/clear` · `start fresh` · `let's move on`
+
+For ambiguous cues, show:
+```
+[RL] Settling cue detected. Proposed WAL entry:
+  Question: <synthesized — the decision question, one sentence>
+  Answer:   <synthesized — the chosen outcome, one sentence>
+  Type:     decision  (change if needed: wont_do / table / observation)
+
+Capture this? [yes / edit / skip]
+```
+
+On "yes" (or immediately for unambiguous cues), run the direct-capture block:
+
+```bash
+python3 << 'PYEOF'
+import json, urllib.request, os, pathlib, datetime
+
+BACKEND = "http://44.200.186.86/reasoning"
+repo = os.getcwd()
+
+body = json.dumps({
+    "question_text": """<synthesized question>""",
+    "answer": """<synthesized answer>""",
+    "entry_type": "<decision|wont_do|table|observation>",
+    "rationale": """<rationale if present, else empty string>""",
+    "linked_repo": repo,
+}).encode()
+req = urllib.request.Request(
+    BACKEND + "/api/decisions",
+    data=body, headers={"Content-Type": "application/json"}, method="POST"
+)
+resp = json.loads(urllib.request.urlopen(req).read())
+hex_id = resp["hex_id"]
+date_str = datetime.date.today().isoformat()
+
+log_path = pathlib.Path(repo) / "context_log.md"
+rationale_line = f"\n**Rationale:** {resp['rationale']}" if resp.get('rationale') else ""
+entry = f"\n## `{hex_id}` — {resp['entry_type']} — {date_str}\n\n**Question:** {resp['question_text']}\n\n**Decision:** {resp['answer']}{rationale_line}\n\n---\n"
+
+if not log_path.exists():
+    log_path.write_text(
+        f"# Context Log\n\n> Append-only WAL. Managed by Reasoning Layer.\n\n---\n{entry}",
+        encoding="utf8"
+    )
+else:
+    with open(log_path, "a", encoding="utf8") as f:
+        f.write(entry)
+
+print(f"[RL] Captured [{hex_id}] — {resp['entry_type']}")
+PYEOF
+```
+
+Then immediately run the conflict check (best-effort — never blocks):
+
+```bash
+python3 << 'PYEOF'
+import json, urllib.request, os
+
+BACKEND = "http://44.200.186.86/reasoning"
+
+try:
+    url = f"{BACKEND}/api/decisions/{hex_id}/conflicts"
+    cresult = json.loads(urllib.request.urlopen(url, timeout=8).read())
+    cfls = cresult.get("conflicts", [])
+    if cfls:
+        print(f"\n⚠  [RL] Conflict detected — {len(cfls)} existing decision(s) contradict this one:")
+        for c in cfls:
+            print(f"  [{c['hex_id']}] Q: {c['question_text']}")
+            print(f"    A: {c['answer']}")
+            print(f"    Why it conflicts: {c['reason']}")
+        print("\n  How would you like to resolve this?")
+        print("  1. Rollback theirs — supersede with your decision (entry_type=rollback, supersedes_id=<their hex_id>)")
+        print("  2. Route both to a Slack reviewer to arbitrate (use /decide or the extension command)")
+        print("  3. Acknowledge — create an 'observation' entry noting both positions exist")
+    else:
+        print("[RL] No conflicts detected.")
+except Exception:
+    pass  # best-effort — conflict check never blocks progress
+PYEOF
+```
+
+When the developer picks a resolution:
+- **Option 1 (Rollback):** Run the direct-capture block with `entry_type=rollback` and `supersedes_id=<their hex_id>`
+- **Option 2 (Route to reviewer):** Use the analyze pipeline (Steps 1–4) or the VS Code "Generate Questions for Task" command
+- **Option 3 (Acknowledge):** Run the direct-capture block with `entry_type=observation` and note both positions
+
+After capture and conflict check, show the one-line confirmation: `[RL] Captured [hex_id].` then continue with the task normally.
 
 ---
 
@@ -57,13 +158,21 @@ if in_flight:
         print(f"  [{q['session_id'][:8]}] {q['question_text']}")
         print(f"    working assumption: {q.get('assumption', 'see interim WAL entry')}")
 
-if not settled and not in_flight:
-    print("No new decisions or in-flight questions.")
+conflicts = resp.get("conflicts", [])
+if conflicts:
+    print(f"\n⚠  {len(conflicts)} conflict(s) detected among recent decisions for this repo:")
+    for c in conflicts:
+        print(f"  [{c['hex_a']}] vs [{c['hex_b']}]: {c['reason']}")
+    print("  Resolve via: Supersede Decision command, Slack routing, or an 'observation' WAL entry.")
+
+if not settled and not in_flight and not conflicts:
+    print("No new decisions, in-flight questions, or conflicts.")
 PYEOF
 ```
 
 Surface settled decisions as constraints before describing the new task. Surface in-flight
-questions so the developer knows which working assumptions are still pending.
+questions so the developer knows which working assumptions are still pending. Surface conflicts
+so they can be resolved before new work begins.
 
 ---
 
@@ -144,9 +253,9 @@ BACKEND = "http://44.200.186.86/reasoning"
 repo = os.getcwd()
 
 # ?format=narrative  (default) — narrative markdown log
-# ?format=adr        — ADR table format
-# ?since=<iso>       — entries after a date
-# ?type=<entry_type> — filter by type (decision, rollback, wont_do, table, observation)
+# ?format=adr           — ADR table format
+# ?since=<iso>          — entries after a date
+# ?type=<entry_type>    — filter by type (decision, rollback, wont_do, table, observation)
 url = f"{BACKEND}/api/repos/{urllib.request.quote(repo, safe='')}/context-log?format=narrative"
 print(urllib.request.urlopen(url).read().decode())
 PYEOF
@@ -158,7 +267,10 @@ needs a birds-eye view of all past decisions for this repo.
 
 ---
 
-### Step 1 — Submit the task
+### Step 1 — Submit the task (opt-in: run only when developer explicitly requests question generation)
+
+> Run Steps 1–4 only when the developer says "analyze this", "generate questions", or uses `/decide`.
+> For everything else, use Capture mode (settling cue detection above).
 
 ```bash
 python3 << 'PYEOF'

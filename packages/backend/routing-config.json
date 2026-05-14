@@ -2,27 +2,27 @@
   "stakeholders": [
     {
       "name": "Architect",
-      "slack_id": "U0B2TFPCRBN",
+      "slack_id": "REPLACE_WITH_ARCHITECT_SLACK_ID",
       "categories": ["architecture", "infrastructure", "infra", "architectural", "system design", "scalability", "performance", "database", "api design"]
     },
     {
       "name": "Product Manager",
-      "slack_id": "U0B2TFPCRBN",
+      "slack_id": "REPLACE_WITH_PM_SLACK_ID",
       "categories": ["product", "ux", "user experience", "scope", "requirements", "feature", "roadmap", "business logic", "workflow"]
     },
     {
       "name": "Legal / Compliance",
-      "slack_id": "U0B2TFPCRBN",
+      "slack_id": "REPLACE_WITH_LEGAL_SLACK_ID",
       "categories": ["compliance", "legal", "regulatory", "privacy", "gdpr", "data protection", "licensing", "ip", "intellectual property"]
     },
     {
       "name": "Security Lead",
-      "slack_id": "U0B2TFPCRBN",
+      "slack_id": "REPLACE_WITH_SECURITY_SLACK_ID",
       "categories": ["security", "auth", "authentication", "authorization", "encryption", "vulnerability", "access control"]
     },
     {
       "name": "Data Lead",
-      "slack_id": "U0B2TFPCRBN",
+      "slack_id": "REPLACE_WITH_DATA_LEAD_SLACK_ID",
       "categories": ["data", "analytics", "reporting", "data model", "schema", "migration", "data pipeline"]
     }
   ],
